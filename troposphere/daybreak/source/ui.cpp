@@ -66,8 +66,8 @@ namespace dbk {
         /* Update install state. */
         char g_update_path[FS_MAX_PATH];
         bool g_reset_to_factory = false;
-        bool g_exfat_supported = false;
-        bool g_use_exfat = false;
+        bool g_exfat_supported = true;
+        bool g_use_exfat = true;
 
         constexpr u32 MaxTapMovement = 20;
 
@@ -889,7 +889,7 @@ namespace dbk {
                     /* Check if exfat is supported. */
                     g_exfat_supported = m_update_info.exfat_supported && R_SUCCEEDED(m_validation_info.exfat_result);
                     if (!g_exfat_supported) {
-                        g_use_exfat = false;
+                        g_use_exfat = true;
                     }
 
                     /* Create the next menu. */
@@ -960,11 +960,7 @@ namespace dbk {
 
             std::shared_ptr<Menu> next_menu;
 
-            if (g_exfat_supported) {
-                next_menu = std::make_shared<ChooseExfatMenu>(g_current_menu);
-            } else {
-                next_menu = std::make_shared<WarningMenu>(g_current_menu, std::make_shared<InstallUpdateMenu>(g_current_menu), "Ready to begin update installation", "Are you sure you want to proceed?");
-            }
+            next_menu = std::make_shared<WarningMenu>(g_current_menu, std::make_shared<InstallUpdateMenu>(g_current_menu), "Ready to begin update installation", "Are you sure you want to proceed?");
 
             if (g_reset_to_factory) {
                 ChangeMenu(std::make_shared<WarningMenu>(g_current_menu, next_menu, "Warning: Factory reset selected", "Saves and installed games will be permanently deleted."));
@@ -1022,7 +1018,7 @@ namespace dbk {
         if (const Button *activated_button = this->GetActivatedButton(); activated_button != nullptr) {
             switch (activated_button->id) {
                 case Fat32ButtonId:
-                    g_use_exfat = false;
+                    g_use_exfat = true;
                     break;
                 case ExFatButtonId:
                     g_use_exfat = true;
