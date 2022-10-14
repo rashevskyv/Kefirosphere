@@ -89,12 +89,12 @@ namespace ams::ldr {
                 R_UNLESS((acid->flags & Acid::AcidFlag_Production) != 0, ldr::ResultInvalidMeta());
             }
 
-            /* Validate that the acid version is correct. */
-            constexpr u8 MinimumValueForAcid209 = 14; /* TODO: What is the actual meaning of this value? */
-            if (acid->unknown_209 < MinimumValueForAcid209) {
-                R_UNLESS(acid->version == 0,     ldr::ResultInvalidMeta());
-                R_UNLESS(acid->unknown_209 == 0, ldr::ResultInvalidMeta());
-            }
+            // /* Validate that the acid version is correct. */
+            // constexpr u8 MinimumValueForAcid209 = 14; /* TODO: What is the actual meaning of this value? */
+            // if (acid->unknown_209 < MinimumValueForAcid209) {
+            //     R_UNLESS(acid->version == 0,     ldr::ResultInvalidMeta());
+            //     R_UNLESS(acid->unknown_209 == 0, ldr::ResultInvalidMeta());
+            // }
 
             /* Validate Fac, Sac, Kac. */
             R_TRY(ValidateSubregion(sizeof(Acid), size, acid->fac_offset, acid->fac_size));
@@ -139,7 +139,7 @@ namespace ams::ldr {
             const bool is_signature_valid = crypto::VerifyRsa2048PssSha256(sig, sig_size, mod, mod_size, exp, exp_size, msg, msg_size);
             R_UNLESS(is_signature_valid || !IsEnabledProgramVerification(), ldr::ResultInvalidAcidSignature());
 
-            meta->check_verification_data = is_signature_valid;
+            meta->check_verification_data = false;
             R_SUCCEED();
         }
 
