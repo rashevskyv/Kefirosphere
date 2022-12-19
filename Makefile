@@ -39,4 +39,7 @@ $(eval $(call ATMOSPHERE_ADD_TARGETS, nx, nx-hac-001, arm-cortex-a57,))
 
 clean-all: $(foreach config,$(ATMOSPHERE_BUILD_CONFIGS),clean-$(config))
 
-.PHONY: all clean clean-all $(foreach config,$(ATMOSPHERE_BUILD_CONFIGS), $(config) clean-$(config))
+kefir:
+	cd libraries/libstratosphere && $(MAKE) -j12 clean && cd ../../stratosphere/ams_mitm && $(MAKE) -j12 clean && cd ../.. && $(MAKE) -j12
+
+.PHONY: all clean clean-all kefir-version $(foreach config,$(ATMOSPHERE_BUILD_CONFIGS), $(config) clean-$(config))
