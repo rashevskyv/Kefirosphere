@@ -101,7 +101,7 @@ namespace ams::mitm::fs {
         const bool is_system = attribute.system_save_data_id != InvalidSystemSaveDataId && IsEmptyAccountId(attribute.user_id);
         size_t out_path_len;
         if (is_system) {
-            out_path_len = static_cast<size_t>(util::SNPrintf(dst, dst_size, "/atmosphere/saves/%s/%s/%s/%016lx", emummc_str, space_id_str, save_type_str, attribute.system_save_data_id));
+            out_path_len = static_cast<size_t>(util::SNPrintf(dst, dst_size, "/atmosphere/saves/%s/%s/%016lx", emummc_str, space_id_str, save_type_str, attribute.system_save_data_id));
         } else {
             out_path_len = static_cast<size_t>(util::SNPrintf(dst, dst_size, "/atmosphere/saves/%s/%s/%s/%016lx/%016lx%016lx", emummc_str, space_id_str, save_type_str, static_cast<u64>(program_id), attribute.user_id.data[1], attribute.user_id.data[0]));
         }
