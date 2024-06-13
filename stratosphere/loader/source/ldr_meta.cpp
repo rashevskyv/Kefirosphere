@@ -190,7 +190,7 @@ namespace ams::ldr {
     }
 
     /* API. */
-    Result LoadMeta(Meta *out_meta, const ncm::ProgramLocation &loc, const cfg::OverrideStatus &status) {
+    Result LoadMeta(Meta *out_meta, const ncm::ProgramLocation &loc, const cfg::OverrideStatus &status, PlatformId platform, bool unk_unused) {
         /* Set the cached program id back to zero. */
         g_cached_program_id = {};
 
@@ -259,6 +259,7 @@ namespace ams::ldr {
                 R_TRY(fs::OpenFile(std::addressof(file), BaseMetaPath, fs::OpenMode_Read));
                 ON_SCOPE_EXIT { fs::CloseFile(file); };
                 R_TRY(LoadMetaFromFile(file, std::addressof(g_original_meta_cache)));
+                R_TRY(ValidateAcidSignature(std::addressof(g_original_meta_cache.meta), platform, unk_unused));
                 meta->modulus                 = g_original_meta_cache.meta.modulus;
                 meta->check_verification_data = g_original_meta_cache.meta.check_verification_data;
             }
@@ -277,9 +278,9 @@ namespace ams::ldr {
         R_SUCCEED();
     }
 
-    Result LoadMetaFromCache(Meta *out_meta, const ncm::ProgramLocation &loc, const cfg::OverrideStatus &status) {
+    Result LoadMetaFromCache(Meta *out_meta, const ncm::ProgramLocation &loc, const cfg::OverrideStatus &status, PlatformId platform) {
         if (g_cached_program_id != loc.program_id || g_cached_override_status != status) {
-            R_RETURN(LoadMeta(out_meta, loc, status));
+            R_RETURN(LoadMeta(out_meta, loc, status, platform, false));
         }
         *out_meta = g_meta_cache.meta;
         R_SUCCEED();
