@@ -599,7 +599,7 @@ namespace ams::ldr {
         R_TRY(ValidateMeta(std::addressof(meta), loc));
 
         /* Validate meta. */
-        R_TRY(ValidateMeta(std::addressof(meta), loc, mount.GetCodeVerificationData()));
+        R_TRY(ValidateMeta(std::addressof(meta), loc));
 
         /* Load, validate NSO headers. */
         R_TRY(LoadAutoLoadHeaders(g_nso_headers, g_has_nso));
