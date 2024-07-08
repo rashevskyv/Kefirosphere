@@ -30,7 +30,7 @@ namespace ams::nxboot {
 
     namespace {
 
-        constexpr const char ExternalPackageFilePath[] = "sdmc:/atmosphere/package3";
+        constexpr const char ExternalPackageFilePath[] = "sdmc:/atmosphere/package3_8gb";
 
         constinit fs::FileHandle g_package_file;
 
