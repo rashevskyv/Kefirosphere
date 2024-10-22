@@ -500,7 +500,7 @@ namespace ams::nxboot {
         };
 
         constexpr const u8 NoNcaHeaderSignatureCheckPatch2[] = {
-            0x10, 0x00, 0x00, 0x14,
+            0x1E, 0x00, 0x00, 0x14,
         };
 
         void AddNoNcaHeaderSignatureCheckPatches(InitialProcessMeta *fs_meta, FsVersion fs_version) {
