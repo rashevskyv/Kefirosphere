@@ -424,7 +424,7 @@ namespace ams::ldr {
             }
         }
     }
-
+    
     void PreProcessCapability(util::BitPack32 *kac, size_t count) {
         for (size_t i = 0; i < count; ++i) {
             const auto cap = kac[i];
@@ -454,6 +454,4 @@ namespace ams::ldr {
             }
         }
     }
-
-
 }

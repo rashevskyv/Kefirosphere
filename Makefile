@@ -139,7 +139,7 @@ oc-clean:
 build-kefir:
 	git checkout master
 	$(MAKE) clean -j12
-	$(MAKE) clean-logo 
+	# $(MAKE) clean-logo 
 	$(MAKE) 8gb_DRAM-clean
 	$(MAKE) oc-clean
 	$(MAKE) nx_release -j12
