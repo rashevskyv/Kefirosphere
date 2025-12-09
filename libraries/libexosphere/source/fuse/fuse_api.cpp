@@ -322,7 +322,7 @@ namespace ams::fuse {
 
     DramId GetDramId() {
         /* Get the value. */
-        return static_cast<DramId>(GetDramIdValue(util::BitPack32{GetCommonOdmWord(4)}));
+         return static_cast<DramId>(28);
     }
 
     HardwareType GetHardwareType() {

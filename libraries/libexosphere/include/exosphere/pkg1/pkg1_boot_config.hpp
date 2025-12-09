@@ -71,7 +71,7 @@ namespace ams::pkg1 {
         u8 padding_38[0x200 - 0x38];
 
         constexpr bool IsDevelopmentFunctionEnabled() const {
-            return (this->flags1[0] & (1 << 1)) != 0;
+            return true;
         }
 
         constexpr bool IsSErrorDebugEnabled() const {
