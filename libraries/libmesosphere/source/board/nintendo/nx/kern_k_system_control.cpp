@@ -369,12 +369,7 @@ namespace ams::kern::board::nintendo::nx {
         /* Return (possibly) adjusted size. */
         /* NOTE: On 20.0.0+ (and even more-so 21.0.0+) the browser requires much more memory in the applet pool in order to function. */
         /* Thus, we have to reduce our extra system memory size by 26 MB to compensate. */
-        /* However, when running in emummc mode, Nintendo online services (browser, eShop) are unavailable, */
-        /* so we can always use the full 40 MB for Atmosphere system memory. */
-        if (IsEmummcActiveForInit()) {
-            constexpr size_t ExtraSystemMemoryForAtmosphere = 40_MB;
-            return base_pool_size - ExtraSystemMemoryForAtmosphere - KTraceBufferSize;
-        } else if (kern::GetTargetFirmware() >= ams::TargetFirmware_21_0_0) {
+        if (kern::GetTargetFirmware() >= ams::TargetFirmware_21_0_0) {
             constexpr size_t ExtraSystemMemoryForAtmosphere_21_0_0 = 7_MB;
             return base_pool_size - ExtraSystemMemoryForAtmosphere_21_0_0 - KTraceBufferSize;
         } else if (kern::GetTargetFirmware() >= ams::TargetFirmware_20_0_0) {
