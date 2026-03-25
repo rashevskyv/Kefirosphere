@@ -112,24 +112,24 @@ clean-logo:
 kefir-version:
 	cd libraries/libstratosphere && $(MAKE) -j$(NPROCS) clean && cd ../../stratosphere/ams_mitm && $(MAKE) -j$(NPROCS) clean && cd ../.. && $(MAKE) -j$(NPROCS)
 
-8gb_DRAM:
-	$(info ---------------------------------------------------------)
-	$(info             Built with 8GB DRAM!)
-	$(info ---------------------------------------------------------)
-	git checkout 8gb_DRAM
-	git merge master --no-edit
-	$(MAKE) clean -j$(NPROCS)
-	$(MAKE) -f atmosphere.mk package3 ATMOSPHERE_GIT_REVISION="K$(KEF_VERSION)-8GB" -j$(NPROCS)
-	$(MAKE) -C fusee -j$(NPROCS)
-	mkdir -p $(KEF_8GB_DIR)/atmosphere/
-	mkdir -p $(KEF_8GB_DIR)/bootloader/payloads/
-	cp fusee/out/nintendo_nx_arm_armv4t/release/package3 $(KEF_8GB_DIR)/atmosphere/package3
-	cp fusee/out/nintendo_nx_arm_armv4t/release/fusee.bin $(KEF_8GB_DIR)/bootloader/payloads/fusee.bin
-	python utilities/insert_splash_screen.py ~/dev/_kefir/bootlogo/splash_logo.png $(KEF_8GB_DIR)/atmosphere/package3
-	$(info ---------------------------------------------------------)
-	$(info             FINISH building with 8GB DRAM!)
-	$(info ---------------------------------------------------------)
-	git checkout master
+# 8gb_DRAM:
+# 	$(info ---------------------------------------------------------)
+# 	$(info             Built with 8GB DRAM!)
+# 	$(info ---------------------------------------------------------)
+# 	git checkout 8gb_DRAM
+# 	git merge master --no-edit
+# 	$(MAKE) clean -j$(NPROCS)
+# 	$(MAKE) -f atmosphere.mk package3 ATMOSPHERE_GIT_REVISION="K$(KEF_VERSION)-8GB" -j$(NPROCS)
+# 	$(MAKE) -C fusee -j$(NPROCS)
+# 	mkdir -p $(KEF_8GB_DIR)/atmosphere/
+# 	mkdir -p $(KEF_8GB_DIR)/bootloader/payloads/
+# 	cp fusee/out/nintendo_nx_arm_armv4t/release/package3 $(KEF_8GB_DIR)/atmosphere/package3
+# 	cp fusee/out/nintendo_nx_arm_armv4t/release/fusee.bin $(KEF_8GB_DIR)/bootloader/payloads/fusee.bin
+# 	python utilities/insert_splash_screen.py ~/dev/_kefir/bootlogo/splash_logo.png $(KEF_8GB_DIR)/atmosphere/package3
+# 	$(info ---------------------------------------------------------)
+# 	$(info             FINISH building with 8GB DRAM!)
+# 	$(info ---------------------------------------------------------)
+# 	git checkout master
 
 oc:
 	$(info ---------------------------------------------------------)
