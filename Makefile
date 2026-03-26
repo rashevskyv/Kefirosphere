@@ -113,18 +113,18 @@ kefir-version:
 	cd libraries/libstratosphere && $(MAKE) -j$(NPROCS) clean && cd ../../stratosphere/ams_mitm && $(MAKE) -j$(NPROCS) clean && cd ../.. && $(MAKE) -j$(NPROCS)
 
 fetch-hekate:
-	$(info ---------------------------------------------------------)
-	$(info Fetching latest hekate *_ram8GB.bin from GitHub...)
-	$(info ---------------------------------------------------------)
+	@echo "---------------------------------------------------------"
+	@echo ">>> Fetching latest hekate *_ram8GB.bin from GitHub..."
+	@echo "---------------------------------------------------------"
 	@python3 $(CURRENT_DIRECTORY)/utilities/fetch_hekate.py $(KEF_8GB_DIR)/payload.bin
 	mkdir -p $(KEF_8GB_DIR)/bootloader/
 	cp $(KEF_8GB_DIR)/payload.bin $(KEF_8GB_DIR)/bootloader/update.bin
-	$(info ---------------------------------------------------------)
+	@echo "---------------------------------------------------------"
 
 8gb_DRAM: fetch-hekate
-	$(info ---------------------------------------------------------)
-	$(info             Built with 8GB DRAM!)
-	$(info ---------------------------------------------------------)
+	@echo "---------------------------------------------------------"
+	@echo "            Built with 8GB DRAM!"
+	@echo "---------------------------------------------------------"
 	git checkout 8gb_DRAM
 	git merge master --no-edit
 	$(MAKE) clean -j$(NPROCS)
@@ -135,9 +135,9 @@ fetch-hekate:
 	cp fusee/out/nintendo_nx_arm_armv4t/release/package3 $(KEF_8GB_DIR)/atmosphere/package3
 	cp fusee/out/nintendo_nx_arm_armv4t/release/fusee.bin $(KEF_8GB_DIR)/bootloader/payloads/fusee.bin
 	python utilities/insert_splash_screen.py ~/dev/_kefir/bootlogo/splash_logo.png $(KEF_8GB_DIR)/atmosphere/package3
-	$(info ---------------------------------------------------------)
-	$(info             FINISH building with 8GB DRAM!)
-	$(info ---------------------------------------------------------)
+	@echo "---------------------------------------------------------"
+	@echo "            FINISH building with 8GB DRAM!"
+	@echo "---------------------------------------------------------"
 	git checkout master
 
 oc:
