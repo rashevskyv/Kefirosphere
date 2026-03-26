@@ -116,7 +116,9 @@ fetch-hekate:
 	$(info ---------------------------------------------------------)
 	$(info Fetching latest hekate *_ram8GB.bin from GitHub...)
 	$(info ---------------------------------------------------------)
-	@python3 $(CURRENT_DIRECTORY)/utilities/fetch_hekate.py $(KEF_8GB_DIR)/bootloader/payloads/payload.bin
+	@python3 $(CURRENT_DIRECTORY)/utilities/fetch_hekate.py $(KEF_8GB_DIR)/payload.bin
+	mkdir -p $(KEF_8GB_DIR)/bootloader/
+	cp $(KEF_8GB_DIR)/payload.bin $(KEF_8GB_DIR)/bootloader/update.bin
 	$(info ---------------------------------------------------------)
 
 8gb_DRAM: fetch-hekate
