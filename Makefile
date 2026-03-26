@@ -112,24 +112,48 @@ clean-logo:
 kefir-version:
 	cd libraries/libstratosphere && $(MAKE) -j$(NPROCS) clean && cd ../../stratosphere/ams_mitm && $(MAKE) -j$(NPROCS) clean && cd ../.. && $(MAKE) -j$(NPROCS)
 
-# 8gb_DRAM:
-# 	$(info ---------------------------------------------------------)
-# 	$(info             Built with 8GB DRAM!)
-# 	$(info ---------------------------------------------------------)
-# 	git checkout 8gb_DRAM
-# 	git merge master --no-edit
-# 	$(MAKE) clean -j$(NPROCS)
-# 	$(MAKE) -f atmosphere.mk package3 ATMOSPHERE_GIT_REVISION="K$(KEF_VERSION)-8GB" -j$(NPROCS)
-# 	$(MAKE) -C fusee -j$(NPROCS)
-# 	mkdir -p $(KEF_8GB_DIR)/atmosphere/
-# 	mkdir -p $(KEF_8GB_DIR)/bootloader/payloads/
-# 	cp fusee/out/nintendo_nx_arm_armv4t/release/package3 $(KEF_8GB_DIR)/atmosphere/package3
-# 	cp fusee/out/nintendo_nx_arm_armv4t/release/fusee.bin $(KEF_8GB_DIR)/bootloader/payloads/fusee.bin
-# 	python utilities/insert_splash_screen.py ~/dev/_kefir/bootlogo/splash_logo.png $(KEF_8GB_DIR)/atmosphere/package3
-# 	$(info ---------------------------------------------------------)
-# 	$(info             FINISH building with 8GB DRAM!)
-# 	$(info ---------------------------------------------------------)
-# 	git checkout master
+fetch-hekate:
+	$(info ---------------------------------------------------------)
+	$(info Fetching latest hekate *_ram8GB.bin from GitHub...)
+	$(info ---------------------------------------------------------)
+	mkdir -p $(KEF_8GB_DIR)/bootloader/payloads/
+	@python3 -c "
+import urllib.request, json, sys, os
+url = 'https://api.github.com/repos/CTCaer/hekate/releases/latest'
+req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+with urllib.request.urlopen(req) as r:
+    data = json.load(r)
+assets = [a for a in data['assets'] if 'ram8GB' in a['name'] and a['name'].endswith('.bin')]
+if not assets:
+    print('ERROR: No hekate *_ram8GB.bin asset found in latest release!', file=sys.stderr)
+    sys.exit(1)
+asset = assets[0]
+dest = os.path.expandvars('$(KEF_8GB_DIR)/bootloader/payloads/payload.bin')
+print(f\"Downloading {asset['name']} -> {dest}\")
+urllib.request.urlretrieve(asset['browser_download_url'], dest)
+print('Done.')
+"
+	$(info Hekate payload downloaded successfully.)
+	$(info ---------------------------------------------------------)
+
+8gb_DRAM: fetch-hekate
+	$(info ---------------------------------------------------------)
+	$(info             Built with 8GB DRAM!)
+	$(info ---------------------------------------------------------)
+	git checkout 8gb_DRAM
+	git merge master --no-edit
+	$(MAKE) clean -j$(NPROCS)
+	$(MAKE) -f atmosphere.mk package3 ATMOSPHERE_GIT_REVISION="K$(KEF_VERSION)-8GB" -j$(NPROCS)
+	$(MAKE) -C fusee -j$(NPROCS)
+	mkdir -p $(KEF_8GB_DIR)/atmosphere/
+	mkdir -p $(KEF_8GB_DIR)/bootloader/payloads/
+	cp fusee/out/nintendo_nx_arm_armv4t/release/package3 $(KEF_8GB_DIR)/atmosphere/package3
+	cp fusee/out/nintendo_nx_arm_armv4t/release/fusee.bin $(KEF_8GB_DIR)/bootloader/payloads/fusee.bin
+	python utilities/insert_splash_screen.py ~/dev/_kefir/bootlogo/splash_logo.png $(KEF_8GB_DIR)/atmosphere/package3
+	$(info ---------------------------------------------------------)
+	$(info             FINISH building with 8GB DRAM!)
+	$(info ---------------------------------------------------------)
+	git checkout master
 
 oc:
 	$(info ---------------------------------------------------------)
@@ -173,4 +197,4 @@ kefir:
 	$(MAKE) oc
 	$(MAKE) 40mb
 
-.PHONY: all clean clean-all kefir-version update clean-logo clear 8gb_DRAM oc kefir 40mb $(foreach config,$(ATMOSPHERE_BUILD_CONFIGS), $(config) clean-$(config))
+.PHONY: all clean clean-all kefir-version update clean-logo clear fetch-hekate 8gb_DRAM oc kefir 40mb $(foreach config,$(ATMOSPHERE_BUILD_CONFIGS), $(config) clean-$(config))
