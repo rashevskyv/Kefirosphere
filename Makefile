@@ -175,6 +175,7 @@ oc:
 
 kefir:
 	git checkout master
+	$(MAKE) fetch-hekate
 	$(MAKE) clean -j$(NPROCS)
 	$(MAKE) clean-logo 
 	$(MAKE) nx_release -j$(NPROCS)
