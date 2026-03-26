@@ -121,7 +121,10 @@ fetch-hekate:
 	cp $(KEF_8GB_DIR)/payload.bin $(KEF_8GB_DIR)/bootloader/update.bin
 	@echo "---------------------------------------------------------"
 
-8gb_DRAM: fetch-hekate
+8gb_DRAM:
+ifndef SKIP_FETCH
+	$(MAKE) fetch-hekate
+endif
 	@echo "---------------------------------------------------------"
 	@echo "            Built with 8GB DRAM!"
 	@echo "---------------------------------------------------------"
@@ -179,7 +182,7 @@ kefir:
 	$(MAKE) clean -j$(NPROCS)
 	$(MAKE) clean-logo 
 	$(MAKE) nx_release -j$(NPROCS)
-	$(MAKE) 8gb_DRAM
+	$(MAKE) 8gb_DRAM SKIP_FETCH=1
 	$(MAKE) oc
 	$(MAKE) 40mb
 
