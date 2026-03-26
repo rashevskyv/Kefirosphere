@@ -21,9 +21,9 @@ THIS_MAKEFILE     := $(abspath $(lastword $(MAKEFILE_LIST)))
 CURRENT_DIRECTORY := $(abspath $(dir $(THIS_MAKEFILE)))
 LIBNX_DIR := ../libnx
 
-KEF_8GB_DIR := $(KEFIR_ROOT_DIR)/8gb
-KEF_OC_DIR  := $(KEFIR_ROOT_DIR)/oc
-KEF_40MB_DIR := $(KEFIR_ROOT_DIR)/40mb
+KEF_8GB_DIR := $(KEFIR_ROOT_DIR)/kefir/config/8gb
+KEF_OC_DIR  := $(KEFIR_ROOT_DIR)/kefir/config/oc
+KEF_40MB_DIR := $(KEFIR_ROOT_DIR)/kefir/config/40mb
 
 define ATMOSPHERE_ADD_TARGET
 
@@ -154,7 +154,6 @@ oc:
 	mkdir -p $(KEF_OC_DIR)/atmosphere/kips/
 	mkdir -p $(KEFIR_ROOT_DIR)/kefir/config/oc/atmosphere/kips/
 	cp stratosphere/loader/out/nintendo_nx_arm64_armv8a/release/loader.kip $(KEF_OC_DIR)/atmosphere/kips/kefir.kip
-	cp stratosphere/loader/out/nintendo_nx_arm64_armv8a/release/loader.kip $(KEFIR_ROOT_DIR)/kefir/config/oc/atmosphere/kips/kefir.kip
 	@echo "---------------------------------------------------------"
 	@echo "                  FINISH building OC!"
 	@echo "---------------------------------------------------------"
