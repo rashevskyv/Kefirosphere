@@ -2,8 +2,8 @@ ATMOSPHERE_BUILD_CONFIGS :=
 KEFIR_ROOT_DIR ?= /mnt/d/git/dev/_kefir
 
 ifndef KEF_VERSION
-ifneq ("$(wildcard $(KEFIR_ROOT_DIR)/kefir/version)","")
-KEF_VERSION := $(shell cat $(KEFIR_ROOT_DIR)/kefir/version)
+ifneq ("$(wildcard $(KEFIR_ROOT_DIR)/version)","")
+KEF_VERSION := $(shell cat $(KEFIR_ROOT_DIR)/version)
 else
 KEF_VERSION := UNK
 endif
@@ -116,7 +116,7 @@ fetch-hekate:
 	@echo "---------------------------------------------------------"
 	@echo ">>> Fetching latest hekate *_ram8GB.bin from GitHub..."
 	@echo "---------------------------------------------------------"
-	@python3 $(CURRENT_DIRECTORY)/utilities/fetch_hekate.py $(KEFIR_ROOT_DIR) $(KEF_8GB_DIR)/payload.bin
+	@python3 $(CURRENT_DIRECTORY)/utilities/fetch_hekate.py $(KEFIR_ROOT_DIR)/kefir $(KEF_8GB_DIR)/payload.bin
 	mkdir -p $(KEF_8GB_DIR)/bootloader/
 	cp $(KEF_8GB_DIR)/payload.bin $(KEF_8GB_DIR)/bootloader/update.bin
 	@echo "---------------------------------------------------------"

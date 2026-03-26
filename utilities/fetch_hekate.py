@@ -2,9 +2,9 @@
 """Download the latest hekate release assets from GitHub releases.
 
 Downloads:
-  - hekate_*.zip  -> extract bootloader/ to KEFIR_ROOT_DIR/kefir,
-                     rename hekate_*.bin inside zip to KEFIR_ROOT_DIR/kefir/payload.bin
-  - hekate*_ram8GB.bin -> KEF_8GB_DIR/payload.bin (which is now in KEFIR_ROOT_DIR/kefir/8gb)
+  - hekate_*.zip  -> extract bootloader/ to kefir_root_dir,
+                     rename hekate_*.bin inside zip to kefir_root_dir/payload.bin
+  - hekate*_ram8GB.bin -> ram8gb_dest
 """
 
 import sys
