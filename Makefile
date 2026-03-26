@@ -116,24 +116,7 @@ fetch-hekate:
 	$(info ---------------------------------------------------------)
 	$(info Fetching latest hekate *_ram8GB.bin from GitHub...)
 	$(info ---------------------------------------------------------)
-	mkdir -p $(KEF_8GB_DIR)/bootloader/payloads/
-	@python3 -c "
-import urllib.request, json, sys, os
-url = 'https://api.github.com/repos/CTCaer/hekate/releases/latest'
-req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-with urllib.request.urlopen(req) as r:
-    data = json.load(r)
-assets = [a for a in data['assets'] if 'ram8GB' in a['name'] and a['name'].endswith('.bin')]
-if not assets:
-    print('ERROR: No hekate *_ram8GB.bin asset found in latest release!', file=sys.stderr)
-    sys.exit(1)
-asset = assets[0]
-dest = os.path.expandvars('$(KEF_8GB_DIR)/bootloader/payloads/payload.bin')
-print(f\"Downloading {asset['name']} -> {dest}\")
-urllib.request.urlretrieve(asset['browser_download_url'], dest)
-print('Done.')
-"
-	$(info Hekate payload downloaded successfully.)
+	@python3 $(CURRENT_DIRECTORY)/utilities/fetch_hekate.py $(KEF_8GB_DIR)/bootloader/payloads/payload.bin
 	$(info ---------------------------------------------------------)
 
 8gb_DRAM: fetch-hekate
