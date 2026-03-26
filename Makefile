@@ -2,8 +2,8 @@ ATMOSPHERE_BUILD_CONFIGS :=
 KEFIR_ROOT_DIR ?= /mnt/d/git/dev/_kefir
 
 ifndef KEF_VERSION
-ifneq ("$(wildcard $(KEFIR_ROOT_DIR)/version)","")
-KEF_VERSION := $(shell cat $(KEFIR_ROOT_DIR)/version)
+ifneq ("$(wildcard $(KEFIR_ROOT_DIR)/kefir/version)","")
+KEF_VERSION := $(shell cat $(KEFIR_ROOT_DIR)/kefir/version)
 else
 KEF_VERSION := UNK
 endif
