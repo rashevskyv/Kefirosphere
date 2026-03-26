@@ -87,9 +87,9 @@ update:
 	@echo "---------------------------------------------------------"
 
 clean-logo:
-	$(info ---------------------------------------------------------)
-	$(info  Building logo in $(CURDIR))
-	$(info ---------------------------------------------------------)
+	@echo "---------------------------------------------------------"
+	@echo " Building logo in $(CURDIR)"
+	@echo "---------------------------------------------------------"
 	git checkout master
 	python3 $(CURDIR)/stratosphere/boot/source/bmp_to_array.py
 	$(MAKE) -C $(CURDIR)/stratosphere/boot clean -j$(NPROCS)
@@ -141,9 +141,9 @@ fetch-hekate:
 	git checkout master
 
 oc:
-	$(info ---------------------------------------------------------)
-	$(info                     Built with OC)
-	$(info ---------------------------------------------------------)
+	@echo "---------------------------------------------------------"
+	@echo "                    Built with OC"
+	@echo "---------------------------------------------------------"
 	git checkout oc
 	git merge master --no-edit
 	$(MAKE) clean -j$(NPROCS)
@@ -152,15 +152,15 @@ oc:
 	mkdir -p $(KEFIR_ROOT_DIR)/kefir/config/oc/atmosphere/kips/
 	cp stratosphere/loader/out/nintendo_nx_arm64_armv8a/release/loader.kip $(KEF_OC_DIR)/atmosphere/kips/kefir.kip
 	cp stratosphere/loader/out/nintendo_nx_arm64_armv8a/release/loader.kip $(KEFIR_ROOT_DIR)/kefir/config/oc/atmosphere/kips/kefir.kip
-	$(info ---------------------------------------------------------)
-	$(info                   FINISH building OC!)
-	$(info ---------------------------------------------------------)
+	@echo "---------------------------------------------------------"
+	@echo "                  FINISH building OC!"
+	@echo "---------------------------------------------------------"
 	git checkout master
 
 40mb:
-	$(info ---------------------------------------------------------)
-	$(info                   Building 40MB Mesosphere!)
-	$(info ---------------------------------------------------------)
+	@echo "---------------------------------------------------------"
+	@echo "                  Building 40MB Mesosphere!"
+	@echo "---------------------------------------------------------"
 	git checkout 40mb
 	git merge master --no-edit
 	$(MAKE) clean -j$(NPROCS)
@@ -168,9 +168,9 @@ oc:
 	mkdir -p $(KEF_40MB_DIR)/atmosphere/
 	cp fusee/out/nintendo_nx_arm_armv4t/release/package3 $(KEF_40MB_DIR)/atmosphere/package3
 	python utilities/insert_splash_screen.py ~/dev/_kefir/bootlogo/splash_logo.png $(KEF_40MB_DIR)/atmosphere/package3
-	$(info ---------------------------------------------------------)
-	$(info             FINISH building 40MB!)
-	$(info ---------------------------------------------------------)
+	@echo "---------------------------------------------------------"
+	@echo "            FINISH building 40MB!"
+	@echo "---------------------------------------------------------"
 	git checkout master
 
 kefir:
