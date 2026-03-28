@@ -22,8 +22,8 @@
 #include "ldr_patcher.hpp"
 #include "ldr_process_creation.hpp"
 #include "ldr_ro_manager.hpp"
+#include <stratosphere/util/util_zbic_for_loader.hpp>
 #include "./oc/oc_loader.hpp"
-#include <stratosphere/util/util_zstd_for_loader.hpp>
 
 namespace ams::ldr {
 
@@ -102,11 +102,14 @@ namespace ams::ldr {
             size_t    nso_size[Nso_Count];
         };
 
+<<<<<<< HEAD
         /* Pcv/Ptm check cache. */
         bool g_is_pcv;
         bool g_is_ptm;
 
 
+=======
+>>>>>>> master
         struct AutoLoadModuleInfo {
             bool has_rtld;
             bool has_main;
@@ -277,7 +280,11 @@ namespace ams::ldr {
 
                 /* Zstd compression only allowed on main, and only when both rtld+sdk are present. */
                 if (i != ctx.main_nso_idx || ctx.rtld_idx < 0 || ctx.sdk_nso_idx < 0) {
+<<<<<<< HEAD
                     R_UNLESS((hdr.flags & NsoHeader::Flag_UseZstdCompression) == 0, ldr::ResultInvalidNso());
+=======
+                    R_UNLESS((hdr.flags & NsoHeader::Flag_UseZbicCompression) == 0, ldr::ResultInvalidNso());
+>>>>>>> master
                 }
 
                 /* NSOs must have page-aligned segments. */
@@ -374,10 +381,13 @@ namespace ams::ldr {
             R_UNLESS(meta->aci->program_id >= meta->acid->program_id_min, ldr::ResultInvalidProgramId());
             R_UNLESS(meta->aci->program_id <= meta->acid->program_id_max, ldr::ResultInvalidProgramId());
 
+<<<<<<< HEAD
             /* Check if nca is pcv or ptm */
             g_is_pcv = meta->aci->program_id == ncm::SystemProgramId::Pcv;
             g_is_ptm = meta->aci->program_id == ncm::SystemProgramId::Ptm;
 
+=======
+>>>>>>> master
             /* Validate the kernel capabilities. */
             R_TRY(TestCapability(static_cast<const util::BitPack32 *>(meta->acid_kac), meta->acid->kac_size / sizeof(util::BitPack32), static_cast<const util::BitPack32 *>(meta->aci_kac), meta->aci->kac_size / sizeof(util::BitPack32)));
 
@@ -638,10 +648,16 @@ namespace ams::ldr {
                 out->args_address += aslr_start;
             }
 
+<<<<<<< HEAD
             out->code_address         = aslr_start;
             out->total_size           = total_size;
             out_param->code_address   = aslr_start;
             out_param->code_num_pages = total_size >> 12;
+=======
+            out_param->code_address   = aslr_start;
+            out_param->code_num_pages = total_size >> 12;
+            out->total_size = total_size;
+>>>>>>> master
 
             R_SUCCEED();
         }
@@ -669,7 +685,11 @@ namespace ams::ldr {
             if (is_zstd) {
                 const size_t map_size = static_cast<size_t>(map_end - map_base);
 
+<<<<<<< HEAD
                 bool decompressed = util::DecompressZstdForLoader(g_zstd_dctx_workspace, reinterpret_cast<void *>(map_base), map_size, segment_size, file_size, compressed_data_buf);
+=======
+                bool decompressed = util::DecompressZbicForLoader(g_zstd_dctx_workspace, reinterpret_cast<void *>(map_base), map_size, segment_size, file_size, compressed_data_buf);
+>>>>>>> master
                 R_UNLESS(decompressed, ldr::ResultInvalidNso());
             } else {
                 bool decompressed = (util::DecompressLZ4(reinterpret_cast<void *>(map_base), segment_size, compressed_data_buf, file_size) == static_cast<int>(segment_size));
@@ -693,7 +713,11 @@ namespace ams::ldr {
         }
 
         Result LoadAutoLoadModule(os::NativeHandle process_handle, fs::FileHandle file, const NsoHeader *nso_header, uintptr_t nso_address, size_t nso_size, size_t map_size) {
+<<<<<<< HEAD
             const bool is_zstd = (nso_header->flags & NsoHeader::Flag_UseZstdCompression) != 0;
+=======
+            const bool is_zstd = (nso_header->flags & NsoHeader::Flag_UseZbicCompression) != 0;
+>>>>>>> master
 
             /* Map and read data from file. */
             {
@@ -731,12 +755,15 @@ namespace ams::ldr {
 
                 /* Apply IPS patches. */
                 LocateAndApplyIpsPatchesToModule(nso_header->module_id, map_address, nso_size);
+<<<<<<< HEAD
 
                 /* Apply pcv and ptm patches. */
                 if (g_is_pcv)
                     oc::pcv::Patch(map_address, nso_size);
                 if (g_is_ptm)
                     oc::ptm::Patch(map_address, nso_size);
+=======
+>>>>>>> master
             }
 
             /* Set permissions. */
@@ -768,7 +795,11 @@ namespace ams::ldr {
                 R_TRY(fs::OpenFile(std::addressof(file), GetNsoPath(nso_idx), fs::OpenMode_Read));
                 ON_SCOPE_EXIT { fs::CloseFile(file); };
 
+<<<<<<< HEAD
                 const bool is_zstd    = (ctx.headers[i].flags & NsoHeader::Flag_UseZstdCompression) != 0;
+=======
+                const bool is_zstd    = (ctx.headers[i].flags & NsoHeader::Flag_UseZbicCompression) != 0;
+>>>>>>> master
                 const size_t map_size = is_zstd ? (total_end - process_info->nso_address[i]) : process_info->nso_size[i];
 
                 R_TRY(LoadAutoLoadModule(process_info->process_handle, file, ctx.headers + i,

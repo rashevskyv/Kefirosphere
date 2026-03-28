@@ -15,4 +15,4 @@
  */
 
 #define AMS_ZSTD_IMPLEMENTATION
-#include <stratosphere/util/util_zstd_for_loader.hpp>
+#include <stratosphere/util/util_zbic_for_loader.hpp>
