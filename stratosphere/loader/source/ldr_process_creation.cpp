@@ -22,7 +22,7 @@
 #include "ldr_patcher.hpp"
 #include "ldr_process_creation.hpp"
 #include "ldr_ro_manager.hpp"
-#include <stratosphere/util/util_zstd_for_loader.hpp>
+#include <stratosphere/util/util_zbic_for_loader.hpp>
 
 namespace ams::ldr {
 
@@ -271,7 +271,7 @@ namespace ams::ldr {
 
                 /* Zstd compression only allowed on main, and only when both rtld+sdk are present. */
                 if (i != ctx.main_nso_idx || ctx.rtld_idx < 0 || ctx.sdk_nso_idx < 0) {
-                    R_UNLESS((hdr.flags & NsoHeader::Flag_UseZstdCompression) == 0, ldr::ResultInvalidNso());
+                    R_UNLESS((hdr.flags & NsoHeader::Flag_UseZbicCompression) == 0, ldr::ResultInvalidNso());
                 }
 
                 /* NSOs must have page-aligned segments. */
@@ -628,10 +628,9 @@ namespace ams::ldr {
                 out->args_address += aslr_start;
             }
 
-            out->code_address         = aslr_start;
-            out->total_size           = total_size;
             out_param->code_address   = aslr_start;
             out_param->code_num_pages = total_size >> 12;
+            out->total_size = total_size;
 
             R_SUCCEED();
         }
@@ -659,7 +658,7 @@ namespace ams::ldr {
             if (is_zstd) {
                 const size_t map_size = static_cast<size_t>(map_end - map_base);
 
-                bool decompressed = util::DecompressZstdForLoader(g_zstd_dctx_workspace, reinterpret_cast<void *>(map_base), map_size, segment_size, file_size, compressed_data_buf);
+                bool decompressed = util::DecompressZbicForLoader(g_zstd_dctx_workspace, reinterpret_cast<void *>(map_base), map_size, segment_size, file_size, compressed_data_buf);
                 R_UNLESS(decompressed, ldr::ResultInvalidNso());
             } else {
                 bool decompressed = (util::DecompressLZ4(reinterpret_cast<void *>(map_base), segment_size, compressed_data_buf, file_size) == static_cast<int>(segment_size));
@@ -683,7 +682,7 @@ namespace ams::ldr {
         }
 
         Result LoadAutoLoadModule(os::NativeHandle process_handle, fs::FileHandle file, const NsoHeader *nso_header, uintptr_t nso_address, size_t nso_size, size_t map_size) {
-            const bool is_zstd = (nso_header->flags & NsoHeader::Flag_UseZstdCompression) != 0;
+            const bool is_zstd = (nso_header->flags & NsoHeader::Flag_UseZbicCompression) != 0;
 
             /* Map and read data from file. */
             {
@@ -752,7 +751,7 @@ namespace ams::ldr {
                 R_TRY(fs::OpenFile(std::addressof(file), GetNsoPath(nso_idx), fs::OpenMode_Read));
                 ON_SCOPE_EXIT { fs::CloseFile(file); };
 
-                const bool is_zstd    = (ctx.headers[i].flags & NsoHeader::Flag_UseZstdCompression) != 0;
+                const bool is_zstd    = (ctx.headers[i].flags & NsoHeader::Flag_UseZbicCompression) != 0;
                 const size_t map_size = is_zstd ? (total_end - process_info->nso_address[i]) : process_info->nso_size[i];
 
                 R_TRY(LoadAutoLoadModule(process_info->process_handle, file, ctx.headers + i,

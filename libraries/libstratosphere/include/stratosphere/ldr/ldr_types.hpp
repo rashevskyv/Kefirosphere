@@ -101,7 +101,7 @@ namespace ams::ldr {
             Flag_CheckHashRo        = (1 << 4),
             Flag_CheckHashRw        = (1 << 5),
             Flag_PreventCodeReads   = (1 << 6),
-            Flag_UseZstdCompression = (1 << 7),
+            Flag_UseZbicCompression = (1 << 7),
         };
 
         struct SegmentInfo {
