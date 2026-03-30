@@ -119,6 +119,7 @@ fetch-hekate:
 	@python3 $(CURRENT_DIRECTORY)/utilities/fetch_hekate.py $(KEFIR_ROOT_DIR)/kefir $(KEF_8GB_DIR)/payload.bin
 	mkdir -p $(KEF_8GB_DIR)/bootloader/
 	cp $(KEF_8GB_DIR)/payload.bin $(KEF_8GB_DIR)/bootloader/update.bin
+	cp $(KEF_8GB_DIR)/payload.bin $(KEF_8GB_DIR)/atmosphere/reboot_payload.bin
 	@echo "---------------------------------------------------------"
 
 8gb_DRAM:
@@ -152,8 +153,8 @@ oc:
 	$(MAKE) clean -j$(NPROCS)
 	$(MAKE) -C stratosphere/loader -j$(NPROCS)
 	mkdir -p $(KEF_OC_DIR)/atmosphere/kips/
-	mkdir -p $(KEFIR_ROOT_DIR)/kefir/config/oc/atmosphere/kips/
 	cp stratosphere/loader/out/nintendo_nx_arm64_armv8a/release/loader.kip $(KEF_OC_DIR)/atmosphere/kips/kefir.kip
+	cp stratosphere/loader/out/nintendo_nx_arm64_armv8a/release/loader.kip $(KEF_OC_DIR)/bootloader/loader.kip
 	@echo "---------------------------------------------------------"
 	@echo "                  FINISH building OC!"
 	@echo "---------------------------------------------------------"
