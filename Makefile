@@ -119,6 +119,7 @@ fetch-hekate:
 	@python3 $(CURRENT_DIRECTORY)/utilities/fetch_hekate.py $(KEFIR_ROOT_DIR)/kefir $(KEF_8GB_DIR)/payload.bin
 	mkdir -p $(KEF_8GB_DIR)/bootloader/
 	cp $(KEF_8GB_DIR)/payload.bin $(KEF_8GB_DIR)/bootloader/update.bin
+	cp $(KEF_8GB_DIR)/payload.bin $(KEF_8GB_DIR)/atmosphere/reboot_payload.bin
 	@echo "---------------------------------------------------------"
 
 8gb_DRAM:
