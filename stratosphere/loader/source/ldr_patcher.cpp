@@ -155,7 +155,6 @@ namespace ams::ldr {
                 }
             }
         }
-    }
 
         for (const auto &patch : DisableTicketVerificationPatches) {
             if (std::memcmp(std::addressof(patch.module_id), std::addressof(module_id), sizeof(module_id)) == 0) {
