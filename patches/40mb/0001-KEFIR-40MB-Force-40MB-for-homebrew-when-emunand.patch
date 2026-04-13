@@ -1,0 +1,126 @@
+From 7a5a52573aff906ac084b0005f7cadc631f9f60b Mon Sep 17 00:00:00 2001
+From: rashevskyv <rashevsky.v@gmail.com>
+Date: Mon, 13 Apr 2026 14:22:18 +0300
+Subject: [PATCH] KEFIR 40MB: Force 40MB for homebrew when emunand
+
+---
+ .../nintendo/nx/kern_k_system_control.cpp     | 90 +++----------------
+ 1 file changed, 14 insertions(+), 76 deletions(-)
+
+diff --git a/libraries/libmesosphere/source/board/nintendo/nx/kern_k_system_control.cpp b/libraries/libmesosphere/source/board/nintendo/nx/kern_k_system_control.cpp
+index 1f6c1c7c4..79a2d918d 100644
+--- a/libraries/libmesosphere/source/board/nintendo/nx/kern_k_system_control.cpp
++++ b/libraries/libmesosphere/source/board/nintendo/nx/kern_k_system_control.cpp
+@@ -50,6 +50,12 @@ namespace ams::kern::board::nintendo::nx {
+             return static_cast<u32>(value);
+         }
+ 
++        ALWAYS_INLINE bool IsEmummcActiveForInit() {
++            u64 value = 0;
++            smc::init::GetConfig(&value, 1, smc::ConfigItem::ExosphereEmummcType);
++            return value != 0;
++        }
++
+         ALWAYS_INLINE smc::MemoryArrangement GetMemoryArrangeForInit() {
+             switch(GetMemoryModeForInit() & 0x3F) {
+                 case 0x01:
+@@ -363,88 +369,20 @@ namespace ams::kern::board::nintendo::nx {
+         /* Return (possibly) adjusted size. */
+         /* NOTE: On 20.0.0+ (and even more-so 21.0.0+) the browser requires much more memory in the applet pool in order to function. */
+         /* Thus, we have to reduce our extra system memory size by 26 MB to compensate. */
+-        if (kern::GetTargetFirmware() >= ams::TargetFirmware_21_0_0) {
+-            constexpr size_t ExtraSystemMemoryForAtmosphere_21_0_0 = 7_MB;
+-            return base_pool_size - ExtraSystemMemoryForAtmosphere_21_0_0 - KTraceBufferSize;
+-        } else if (kern::GetTargetFirmware() >= ams::TargetFirmware_20_0_0) {
+-            constexpr size_t ExtraSystemMemoryForAtmosphere_20_0_0 = 14_MB;
+-            return base_pool_size - ExtraSystemMemoryForAtmosphere_20_0_0 - KTraceBufferSize;
++        /* However, when running in emummc mode, Nintendo online services (browser, eShop) are unavailable, */
++        /* so we can always use the full 40 MB for Atmosphere system memory. */
++        if (IsEmummcActiveForInit()) {
++            constexpr size_t ExtraSystemMemoryForAtmosphere = 40_MB;
++            return base_pool_size - ExtraSystemMemoryForAtmosphere - KTraceBufferSize;
++        } else if (kern::GetTargetFirmware() >= ams::TargetFirmware_21_0_0) {
++            constexpr size_t ExtraSystemMemoryForAtmosphere = 14_MB;
++            return base_pool_size - ExtraSystemMemoryForAtmosphere - KTraceBufferSize;
+         } else {
+             constexpr size_t ExtraSystemMemoryForAtmosphere = 40_MB;
+             return base_pool_size - ExtraSystemMemoryForAtmosphere - KTraceBufferSize;
+         }
+     }
+ 
+-    size_t KSystemControl::Init::GetMinimumNonSecureSystemPoolSize() {
+-        /* Verify that our minimum is at least as large as Nintendo's. */
+-        constexpr size_t MinimumSizeWithFatal = ::ams::svc::RequiredNonSecureSystemMemorySizeWithFatal - 1900 * 1024;
+-        // static_assert(MinimumSizeWithFatal >= 0x2C04000);
+-
+-        constexpr size_t MinimumSizeWithoutFatal = ::ams::svc::RequiredNonSecureSystemMemorySize;
+-        static_assert(MinimumSizeWithoutFatal >= 0x2A00000);
+-
+-        /* Include fatal in non-seure size on 16.0.0+. */
+-        return kern::GetTargetFirmware() >= ams::TargetFirmware_16_0_0 ? MinimumSizeWithFatal : MinimumSizeWithoutFatal;
+-    }
+-
+-    u8 KSystemControl::Init::GetDebugLogUartPort() {
+-        /* Get the log configuration. */
+-        u64 value = 0;
+-        smc::init::GetConfig(std::addressof(value), 1, smc::ConfigItem::ExosphereLogConfiguration);
+-
+-        /* Extract the port. */
+-        return static_cast<u8>((value >> 32) & 0xFF);
+-    }
+-
+-    void KSystemControl::Init::CpuOnImpl(u64 core_id, uintptr_t entrypoint, uintptr_t arg) {
+-        MESOSPHERE_INIT_ABORT_UNLESS((::ams::kern::arch::arm64::smc::CpuOn<smc::SmcId_Supervisor>(core_id, entrypoint, arg)) == 0);
+-    }
+-
+-    /* Randomness for Initialization. */
+-    void KSystemControl::Init::GenerateRandom(u64 *dst, size_t count) {
+-        MESOSPHERE_INIT_ABORT_UNLESS(count <= 7);
+-        smc::init::GenerateRandomBytes(dst, count * sizeof(u64));
+-    }
+-
+-    u64 KSystemControl::Init::GenerateRandomRange(u64 min, u64 max) {
+-        return KSystemControlBase::GenerateUniformRange(min, max, GenerateRandomU64ForInit);
+-    }
+-
+-    /* System Initialization. */
+-    void KSystemControl::ConfigureKTargetSystem() {
+-        /* Configure KTargetSystem. */
+-        volatile auto *ts = const_cast<volatile KTargetSystem::KTargetSystemData *>(std::addressof(KTargetSystem::s_data));
+-        {
+-            /* Set whether we're in debug mode. */
+-            {
+-                ts->is_not_debug_mode    = !GetConfigBool(smc::ConfigItem::IsDebugMode);
+-
+-                /* If we're not in debug mode, we don't want to initialize uart logging. */
+-                ts->disable_debug_logging = ts->is_not_debug_mode;
+-            }
+-
+-            /* Set Kernel Configuration. */
+-            {
+-                const auto kernel_config = util::BitPack32{GetConfigU32(smc::ConfigItem::KernelConfiguration)};
+-
+-                ts->disable_debug_memory_fill       = !kernel_config.Get<smc::KernelConfiguration::DebugFillMemory>();
+-                ts->disable_user_exception_handlers = !kernel_config.Get<smc::KernelConfiguration::EnableUserExceptionHandlers>();
+-                ts->disable_dynamic_resource_limits = kernel_config.Get<smc::KernelConfiguration::DisableDynamicResourceLimits>();
+-                ts->disable_user_pmu_access         = !kernel_config.Get<smc::KernelConfiguration::EnableUserPmuAccess>();
+-
+-                /* Configure call smc on panic. */
+-                *const_cast<volatile bool *>(std::addressof(g_call_smc_on_panic)) = kernel_config.Get<smc::KernelConfiguration::UseSecureMonitorPanicCall>();
+-            }
+-
+-            /* Set Kernel Debugging. */
+-            {
+-                /* NOTE: This is used to restrict access to SvcKernelDebug/SvcChangeKernelTraceState. */
+-                /* Mesosphere may wish to not require this, as we'd ideally keep ProgramVerification enabled for userland. */
+-                ts->disable_kernel_debugging = !GetConfigBool(smc::ConfigItem::DisableProgramVerification);
+-            }
+-        }
+-    }
+-
+     void KSystemControl::InitializePhase1() {
+         /* Enable KTargetSystem. */
+         KTargetSystem::SetInitialized();
+-- 
+2.53.0.windows.1
+

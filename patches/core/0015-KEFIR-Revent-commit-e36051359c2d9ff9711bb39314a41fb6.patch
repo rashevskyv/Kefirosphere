@@ -1,0 +1,72 @@
+From 057b71f85a48aee5cf135bc6d8d1e94e85e3806b Mon Sep 17 00:00:00 2001
+From: rashevskyv <rashevsky.v@gmail.com>
+Date: Mon, 13 Apr 2026 14:35:46 +0300
+Subject: [PATCH] KEFIR: Revent commit e36051359c2d9ff9711bb39314a41fb6b0f39ac8
+ for old homebrew support with new atmosphere
+
+---
+ libraries/libmesosphere/source/kern_k_scheduler.cpp       | 8 +-------
+ .../vapours/svc/arch/arm/svc_thread_local_region.hpp      | 5 +----
+ .../vapours/svc/arch/arm64/svc_thread_local_region.hpp    | 5 +----
+ 3 files changed, 3 insertions(+), 15 deletions(-)
+
+diff --git a/libraries/libmesosphere/source/kern_k_scheduler.cpp b/libraries/libmesosphere/source/kern_k_scheduler.cpp
+index e39eab8c9..d5dfbfcef 100644
+--- a/libraries/libmesosphere/source/kern_k_scheduler.cpp
++++ b/libraries/libmesosphere/source/kern_k_scheduler.cpp
+@@ -270,13 +270,7 @@ namespace ams::kern {
+         m_current_thread = next_thread;
+ 
+         /* Set the new Thread Local region. */
+-        const auto tls_address = GetInteger(next_thread->GetThreadLocalRegionAddress());
+-        cpu::SwitchThreadLocalRegion(tls_address);
+-
+-        /* Update the thread's cpu time differential in TLS, if relevant. */
+-        if (tls_address != 0) {
+-            static_cast<ams::svc::ThreadLocalRegion *>(next_thread->GetThreadLocalRegionHeapAddress())->thread_cpu_time = next_thread->GetCpuTime() - cur_tick;
+-        }
++        cpu::SwitchThreadLocalRegion(GetInteger(next_thread->GetThreadLocalRegionAddress()));
+     }
+ 
+     void KScheduler::ClearPreviousThread(KThread *thread) {
+diff --git a/libraries/libvapours/include/vapours/svc/arch/arm/svc_thread_local_region.hpp b/libraries/libvapours/include/vapours/svc/arch/arm/svc_thread_local_region.hpp
+index 69caab7c4..1822eaaf1 100644
+--- a/libraries/libvapours/include/vapours/svc/arch/arm/svc_thread_local_region.hpp
++++ b/libraries/libvapours/include/vapours/svc/arch/arm/svc_thread_local_region.hpp
+@@ -25,11 +25,8 @@ namespace ams::svc::arch::arm {
+         u32 message_buffer[MessageBufferSize / sizeof(u32)];
+         volatile u16 disable_count;
+         volatile u16 interrupt_flag;
+-        volatile u8 cache_maintenance_flag;
+-        volatile s64 thread_cpu_time;
+-        volatile ams::svc::Handle thread_handle;
+         /* TODO: Should we bother adding the Nintendo aarch32 thread local context here? */
+-        uintptr_t TODO[(0x200 - 0x114) / sizeof(uintptr_t)];
++        uintptr_t TODO[(0x200 - 0x104) / sizeof(uintptr_t)];
+     };
+ 
+     ALWAYS_INLINE ThreadLocalRegion *GetThreadLocalRegion() {
+diff --git a/libraries/libvapours/include/vapours/svc/arch/arm64/svc_thread_local_region.hpp b/libraries/libvapours/include/vapours/svc/arch/arm64/svc_thread_local_region.hpp
+index 390d3cb0f..e32c9a572 100644
+--- a/libraries/libvapours/include/vapours/svc/arch/arm64/svc_thread_local_region.hpp
++++ b/libraries/libvapours/include/vapours/svc/arch/arm64/svc_thread_local_region.hpp
+@@ -26,15 +26,12 @@ namespace ams::svc::arch::arm64 {
+         volatile u16 disable_count;
+         volatile u16 interrupt_flag;
+         volatile u8 cache_maintenance_flag;
+-        volatile s64 thread_cpu_time;
+-        volatile ams::svc::Handle thread_handle;
+         /* TODO: How should we handle libnx vs Nintendo user thread local space? */
+-        uintptr_t TODO[(0x200 - 0x114) / sizeof(uintptr_t)];
++        uintptr_t TODO[(0x200 - 0x108) / sizeof(uintptr_t)];
+     };
+     static_assert(__builtin_offsetof(ThreadLocalRegion, disable_count)          == 0x100);
+     static_assert(__builtin_offsetof(ThreadLocalRegion, interrupt_flag)         == 0x102);
+     static_assert(__builtin_offsetof(ThreadLocalRegion, cache_maintenance_flag) == 0x104);
+-    static_assert(__builtin_offsetof(ThreadLocalRegion, thread_cpu_time)        == 0x108);
+ 
+     ALWAYS_INLINE ThreadLocalRegion *GetThreadLocalRegion() {
+         ThreadLocalRegion *tlr;
+-- 
+2.53.0.windows.1
+

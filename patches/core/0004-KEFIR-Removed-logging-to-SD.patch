@@ -1,0 +1,113 @@
+From 1b749596301846d70ecace0693a7246ce842907f Mon Sep 17 00:00:00 2001
+From: rashevskyv <rashevsky.v@gmail.com>
+Date: Mon, 13 Apr 2026 01:11:17 +0300
+Subject: [PATCH 04/14] KEFIR: Removed logging to SD
+
+---
+ .../source/erpt/srv/erpt_srv_report.cpp       | 29 +++++++++----------
+ .../source/erpt/srv/erpt_srv_report.hpp       |  7 +++--
+ 2 files changed, 18 insertions(+), 18 deletions(-)
+
+diff --git a/libraries/libstratosphere/source/erpt/srv/erpt_srv_report.cpp b/libraries/libstratosphere/source/erpt/srv/erpt_srv_report.cpp
+index ceec506b7..4ffad3084 100644
+--- a/libraries/libstratosphere/source/erpt/srv/erpt_srv_report.cpp
++++ b/libraries/libstratosphere/source/erpt/srv/erpt_srv_report.cpp
+@@ -20,10 +20,11 @@
+ namespace ams::erpt::srv {
+ 
+     ReportFileName Report::FileName(ReportId report_id, bool redirect_to_sd) {
++        (void)redirect_to_sd;
+         ReportFileName report_name;
+         util::SNPrintf(report_name.name, sizeof(report_name.name),
+                       "%s:/%08x-%04x-%04x-%02x%02x-%04x%08x",
+-                      (redirect_to_sd ? ReportOnSdStoragePath : ReportStoragePath),
++                      ReportStoragePath,
+                       report_id.uuid_data.time_low,
+                       report_id.uuid_data.time_mid,
+                       report_id.uuid_data.time_high_and_version,
+@@ -41,9 +42,7 @@ namespace ams::erpt::srv {
+     Report::~Report() {
+         this->CloseStream();
+         if (m_record->RemoveReference()) {
+-            if (R_FAILED(this->DeleteStream(this->FileName().name))) {
+-                /* TODO: Log failure? */
+-            }
++            this->DeleteStream(this->FileName().name);
+             delete m_record;
+         }
+     }
+@@ -54,23 +53,24 @@ namespace ams::erpt::srv {
+ 
+     Result Report::Open(ReportOpenType type) {
+         switch (type) {
+-            case ReportOpenType_Create: R_RETURN(this->OpenStream(this->FileName().name, StreamMode_Write, ReportStreamBufferSize));
+-            case ReportOpenType_Read:   R_RETURN(this->OpenStream(this->FileName().name, StreamMode_Read,  ReportStreamBufferSize));
++            case ReportOpenType_Create: R_SUCCEED();
++            case ReportOpenType_Read:   R_SUCCEED();
+             default:                    R_THROW(erpt::ResultInvalidArgument());
+         }
+     }
+ 
+     Result Report::Read(u32 *out_read_count, u8 *dst, u32 dst_size) {
+-        R_RETURN(this->ReadStream(out_read_count, dst, dst_size));
++        (void)out_read_count;
++        (void)dst;
++        (void)dst_size;
++        R_SUCCEED();
+     }
+ 
+     Result Report::Delete() {
+-        R_RETURN(this->DeleteStream(this->FileName().name));
++        R_SUCCEED();
+     }
+ 
+-    void Report::Close() {
+-        return this->CloseStream();
+-    }
++    void Report::Close(){};
+ 
+     Result Report::GetFlags(ReportFlagSet *out) const {
+         *out = m_record->m_info.flags;
+@@ -78,15 +78,12 @@ namespace ams::erpt::srv {
+     }
+ 
+     Result Report::SetFlags(ReportFlagSet flags) {
+-        if (((~m_record->m_info.flags) & flags).IsAnySet()) {
+-            m_record->m_info.flags |= flags;
+-            R_RETURN(Journal::Commit());
+-        }
++        (void)flags;
+         R_SUCCEED();
+     }
+ 
+     Result Report::GetSize(s64 *out) const {
+-        R_RETURN(this->GetStreamSize(out));
++        *out = 0; R_SUCCEED();
+     }
+ 
+ }
+diff --git a/libraries/libstratosphere/source/erpt/srv/erpt_srv_report.hpp b/libraries/libstratosphere/source/erpt/srv/erpt_srv_report.hpp
+index c231439c3..e0b998289 100644
+--- a/libraries/libstratosphere/source/erpt/srv/erpt_srv_report.hpp
++++ b/libraries/libstratosphere/source/erpt/srv/erpt_srv_report.hpp
+@@ -51,12 +51,15 @@ namespace ams::erpt::srv {
+ 
+             template<typename T>
+             Result Write(T val) {
+-                R_RETURN(this->WriteStream(reinterpret_cast<const u8 *>(std::addressof(val)), sizeof(val)));
++                (void)val;
++                R_SUCCEED();
+             }
+ 
+             template<typename T>
+             Result Write(const T *buf, u32 buffer_size) {
+-                R_RETURN(this->WriteStream(reinterpret_cast<const u8 *>(buf), buffer_size));
++                (void)buf;
++                (void)buffer_size;
++                R_SUCCEED();
+             }
+     };
+ 
+-- 
+2.53.0.windows.1
+

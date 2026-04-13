@@ -1,0 +1,3004 @@
+From fa13830ff56ff0fc4a8875569f5a06810a520236 Mon Sep 17 00:00:00 2001
+From: rashevskyv <rashevsky.v@gmail.com>
+Date: Mon, 13 Apr 2026 13:41:55 +0300
+Subject: [PATCH] KEFIR OC: Use overclock
+
+---
+ .../loader/source/ldr_process_creation.cpp    |   15 +
+ stratosphere/loader/source/oc/customize.cpp   |  188 +++
+ stratosphere/loader/source/oc/customize.hpp   |   69 +
+ .../loader/source/oc/mtc_timing_table.hpp     | 1248 +++++++++++++++++
+ stratosphere/loader/source/oc/oc_common.hpp   |   99 ++
+ stratosphere/loader/source/oc/oc_loader.hpp   |   21 +
+ stratosphere/loader/source/oc/pcv/pcv.cpp     |  130 ++
+ stratosphere/loader/source/oc/pcv/pcv.hpp     |  257 ++++
+ .../loader/source/oc/pcv/pcv_common.hpp       |  156 +++
+ .../loader/source/oc/pcv/pcv_erista.cpp       |  108 ++
+ .../loader/source/oc/pcv/pcv_mariko.cpp       |  395 ++++++
+ stratosphere/loader/source/oc/ptm/ptm.cpp     |  126 ++
+ stratosphere/loader/source/oc/ptm/ptm.hpp     |   45 +
+ 13 files changed, 2857 insertions(+)
+ create mode 100644 stratosphere/loader/source/oc/customize.cpp
+ create mode 100644 stratosphere/loader/source/oc/customize.hpp
+ create mode 100644 stratosphere/loader/source/oc/mtc_timing_table.hpp
+ create mode 100644 stratosphere/loader/source/oc/oc_common.hpp
+ create mode 100644 stratosphere/loader/source/oc/oc_loader.hpp
+ create mode 100644 stratosphere/loader/source/oc/pcv/pcv.cpp
+ create mode 100644 stratosphere/loader/source/oc/pcv/pcv.hpp
+ create mode 100644 stratosphere/loader/source/oc/pcv/pcv_common.hpp
+ create mode 100644 stratosphere/loader/source/oc/pcv/pcv_erista.cpp
+ create mode 100644 stratosphere/loader/source/oc/pcv/pcv_mariko.cpp
+ create mode 100644 stratosphere/loader/source/oc/ptm/ptm.cpp
+ create mode 100644 stratosphere/loader/source/oc/ptm/ptm.hpp
+
+diff --git a/stratosphere/loader/source/ldr_process_creation.cpp b/stratosphere/loader/source/ldr_process_creation.cpp
+index 5914ecf3a..8fadaa7b0 100644
+--- a/stratosphere/loader/source/ldr_process_creation.cpp
++++ b/stratosphere/loader/source/ldr_process_creation.cpp
+@@ -22,6 +22,7 @@
+ #include "ldr_patcher.hpp"
+ #include "ldr_process_creation.hpp"
+ #include "ldr_ro_manager.hpp"
++#include "./oc/oc_loader.hpp"
+ 
+ namespace ams::ldr {
+ 
+@@ -100,6 +101,10 @@ namespace ams::ldr {
+             size_t    nso_size[Nso_Count];
+         };
+ 
++        /* Pcv/Ptm check cache. */
++        bool g_is_pcv;
++        bool g_is_ptm;
++
+         struct AutoLoadModuleInfo {
+             bool has_rtld;
+             bool has_main;
+@@ -368,6 +373,10 @@ namespace ams::ldr {
+             R_UNLESS(meta->aci->program_id >= meta->acid->program_id_min, ldr::ResultInvalidProgramId());
+             R_UNLESS(meta->aci->program_id <= meta->acid->program_id_max, ldr::ResultInvalidProgramId());
+ 
++            /* Check if nca is pcv or ptm */
++            g_is_pcv = meta->aci->program_id == ncm::SystemProgramId::Pcv;
++            g_is_ptm = meta->aci->program_id == ncm::SystemProgramId::Ptm;
++
+             /* Validate the kernel capabilities. */
+             R_TRY(TestCapability(static_cast<const util::BitPack32 *>(meta->acid_kac), meta->acid->kac_size / sizeof(util::BitPack32), static_cast<const util::BitPack32 *>(meta->aci_kac), meta->aci->kac_size / sizeof(util::BitPack32)));
+ 
+@@ -710,6 +719,12 @@ namespace ams::ldr {
+ 
+                 /* Apply IPS patches. */
+                 LocateAndApplyIpsPatchesToModule(nso_header->module_id, map_address, nso_size);
++
++                /* Apply pcv and ptm patches. */
++                if (g_is_pcv)
++                    oc::pcv::Patch(map_address, nso_size);
++                if (g_is_ptm)
++                    oc::ptm::Patch(map_address, nso_size);
+             }
+ 
+             /* Set permissions. */
+diff --git a/stratosphere/loader/source/oc/customize.cpp b/stratosphere/loader/source/oc/customize.cpp
+new file mode 100644
+index 000000000..b74676190
+--- /dev/null
++++ b/stratosphere/loader/source/oc/customize.cpp
+@@ -0,0 +1,188 @@
++/*
++ * Copyright (C) Switch-OC-Suite
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include "customize.hpp"
++
++namespace ams::ldr::oc {
++
++volatile EristaMtcTable EristaMtcTablePlaceholder = { .rev = ERISTA_MTC_MAGIC, };
++volatile MarikoMtcTable MarikoMtcTablePlaceholder = { .rev = MARIKO_MTC_MAGIC, };
++
++volatile CustomizeTable C = {
++/* DRAM Timing:
++ * AUTO_ADJ_SAFE_MARIKO_ONLY: Auto adjust timings for Mariko LPDDR4X ≤3733 Mbps specs, 8Gb density. (Default)
++ * AUTO_ADJ_4266_MARIKO_ONLY: Auto adjust timings for Mariko LPDDR4X 4266 Mbps specs, 8Gb density.
++ * NO_ADJ_ALL: No timing adjustment for both Erista and Mariko.
++ * CUSTOMIZED_ALL: Replace with values in customized table for both Erista and Mariko.
++ */
++.mtcConf = AUTO_ADJ_SAFE_MARIKO_ONLY,
++
++/* Common:
++ * - Boost Clock in kHz:
++ *   Default: 1785000
++ *   Boost clock will be applied when applications request higher CPU frequency for quicker loading.
++ *   This will be set regardless of whether sys-clk is enabled.
++ */
++.commonCpuBoostClock = 2193000,
++/* - EMC Vddq (Erista Only) and RAM Vdd2 Voltage in uV
++ *   Range: 1100'000 to 1250'000 uV
++ *   Erista Default(HOS): 1125'000 (bootloader: 1100'000)
++ *   Mariko Default: 1100'000 (It will not work without sys-clk-OC.)
++ *   Value should be divided evenly by 12'500.
++ *   Not enabled by default.
++ */
++.commonEmcMemVolt  = 1200'000,
++
++/* Erista CPU:
++ * - Max Voltage in mV
++ * - CpuVoltL4T: 1235
++ */
++.eristaCpuMaxVolt  = 1120,
++
++/* Erista EMC(RAM):
++ * - RAM Clock in kHz
++ *   [WARNING]
++ *   RAM overclock could be UNSTABLE if timing parameters are not suitable for your DRAM:
++ *   - Graphical glitches
++ *   - System instabilities
++ *   - NAND corruption
++ */
++.eristaEmcMaxClock = 1862400,
++
++/* Mariko CPU:
++ * - Max Voltage in mV:
++ *   Default voltage: 1120
++ */
++.marikoCpuMaxVolt    = 1120,
++
++/* Mariko EMC(RAM):
++ * - RAM Clock in kHz:
++ *   Values should be ≥ 1600000, and divided evenly by 9600.
++ *   [WARNING]
++ *   RAM overclock could be UNSTABLE if timing parameters are not suitable for your DRAM:
++ *   - Graphical glitches
++ *   - System instabilities
++ *   - NAND corruption
++ */
++.marikoEmcMaxClock = 2131200,
++/* - EMC Vddq (Mariko Only) Voltage in uV
++ *   Range: 550'000 to 650'000 uV
++ *   Value should be divided evenly by 5'000
++ *   Default: 600'000
++ *   Not enabled by default.
++ *   This will not work without sys-clk-OC.
++ */
++.marikoEmcVddqVolt = 0,
++
++/* Advanced Settings:
++ * - Erista CPU DVFS Table:
++ */
++.eristaCpuDvfsTable = {
++    {  204000, {  721094 }, {} },
++    {  306000, {  754040 }, {} },
++    {  408000, {  786986 }, {} },
++    {  510000, {  819932 }, {} },
++    {  612000, {  852878 }, {} },
++    {  714000, {  885824 }, {} },
++    {  816000, {  918770 }, {} },
++    {  918000, {  951716 }, {} },
++    { 1020000, {  984662 }, { -2875621,  358099, -8585 } },
++    { 1122000, { 1017608 }, {   -52225,  104159, -2816 } },
++    { 1224000, { 1050554 }, {  1076868,    8356,  -727 } },
++    { 1326000, { 1083500 }, {  2208191,  -84659,  1240 } },
++    { 1428000, { 1116446 }, {  2519460, -105063,  1611 } },
++    { 1581000, { 1130000 }, {  2889664, -122173,  1834 } },
++    { 1683000, { 1168000 }, {  5100873, -279186,  4747 } },
++    { 1785000, { 1227500 }, {  5100873, -279186,  4747 } },
++    // Appending table
++    { 1887000, { 1235000 }, {  5100873, -279186,  4747 } },
++    { 1963500, { 1235000 }, {  5100873, -279186,  4747 } },
++    { 2091000, { 1235000 }, {  5100873, -279186,  4747 } },
++},
++
++/* - Mariko CPU DVFS Table:
++ * 2397000 might not work for some SoCs.
++ */
++.marikoCpuDvfsTable = {
++    {  204000, {  721589, -12695, 27 }, {} },
++    {  306000, {  747134, -14195, 27 }, {} },
++    {  408000, {  776324, -15705, 27 }, {} },
++    {  510000, {  809160, -17205, 27 }, {} },
++    {  612000, {  845641, -18715, 27 }, {} },
++    {  714000, {  885768, -20215, 27 }, {} },
++    {  816000, {  929540, -21725, 27 }, {} },
++    {  918000, {  976958, -23225, 27 }, {} },
++    { 1020000, { 1028021, -24725, 27 }, { 1120000 } },
++    { 1122000, { 1082730, -26235, 27 }, { 1120000 } },
++    { 1224000, { 1141084, -27735, 27 }, { 1120000 } },
++    { 1326000, { 1203084, -29245, 27 }, { 1120000 } },
++    { 1428000, { 1268729, -30745, 27 }, { 1120000 } },
++    { 1581000, { 1374032, -33005, 27 }, { 1120000 } },
++    { 1683000, { 1448791, -34505, 27 }, { 1120000 } },
++    { 1785000, { 1527196, -36015, 27 }, { 1120000 } },
++    { 1887000, { 1609246, -37515, 27 }, { 1120000 } },
++    { 1963500, { 1675751, -38635, 27 }, { 1120000 } },
++    // Appending table
++    { 2091000, { 1716501, -39395, 27 }, { 1120000 } },
++    { 2193000, { 1775132, -40505, 27 }, { 1120000 } },
++},
++
++/* - Erista GPU DVFS Table:
++ */
++.eristaGpuDvfsTable = {
++    {   76800, { }, {  814294, 8144, -940, 808, -21583, 226 } },
++    {  153600, { }, {  856185, 8144, -940, 808, -21583, 226 } },
++    {  230400, { }, {  898077, 8144, -940, 808, -21583, 226 } },
++    {  307200, { }, {  939968, 8144, -940, 808, -21583, 226 } },
++    {  384000, { }, {  981860, 8144, -940, 808, -21583, 226 } },
++    {  460800, { }, {  981860, 8144, -940, 808, -21583, 226 } },
++    {  537600, { }, {  981860, 8144, -940, 808, -21583, 226 } },
++    {  614400, { }, { 1023751, 8144, -940, 808, -21583, 226 } },
++    {  691200, { }, { 1065642, 8144, -940, 808, -21583, 226 } },
++    {  768000, { }, { 1107534, 8144, -940, 808, -21583, 226 } },
++    {  844800, { }, { 1149425, 8144, -940, 808, -21583, 226 } },
++    {  921600, { }, { 1191317, 8144, -940, 808, -21583, 226 } },
++},
++
++/* - Mariko GPU DVFS Table:
++ * 1305600 might not work for some SoCs.
++ */
++.marikoGpuDvfsTable = {
++    {   76800, {}, {  610000,                                 } },
++    {  153600, {}, {  610000,                                 } },
++    {  230400, {}, {  610000,                                 } },
++    {  307200, {}, {  610000,                                 } },
++    {  384000, {}, {  610000,                                 } },
++    {  460800, {}, {  610000,                                 } },
++    {  537600, {}, {  801688, -10900, -163,  298, -10599, 162 } },
++    {  614400, {}, {  801688, -10900, -163,  298, -10599, 162 } },
++    {  691200, {}, {  801688, -10900, -163,  298, -10599, 162 } },
++    {  768000, {}, {  824214,  -5743, -452,  238,  -6325,  81 } },
++    {  844800, {}, {  848830,  -3903, -552,  119,  -4030,  -2 } },
++    {  921600, {}, {  891575,  -4409, -584,    0,  -2849,  39 } },
++    {  998400, {}, {  940071,  -5367, -602,  -60,    -63, -93 } },
++    { 1075200, {}, {  986765,  -6637, -614, -179,   1905, -13 } },
++    { 1152000, {}, { 1098475, -13529, -497, -179,   3626,   9 } },
++    { 1228800, {}, { 1163644, -12688, -648,    0,   1077,  40 } },
++    { 1267200, {}, { 1204812,  -9908, -830,    0,   1469, 110 } },
++},
++
++.eristaMtcTable = const_cast<EristaMtcTable *>(&EristaMtcTablePlaceholder),
++.marikoMtcTable = const_cast<MarikoMtcTable *>(&MarikoMtcTablePlaceholder),
++
++};
++
++}
+\ No newline at end of file
+diff --git a/stratosphere/loader/source/oc/customize.hpp b/stratosphere/loader/source/oc/customize.hpp
+new file mode 100644
+index 000000000..15ec33f0b
+--- /dev/null
++++ b/stratosphere/loader/source/oc/customize.hpp
+@@ -0,0 +1,69 @@
++/*
++ * Copyright (C) Switch-OC-Suite
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#pragma once
++
++#define CUST_REV 4
++
++#include "oc_common.hpp"
++#include "pcv/pcv_common.hpp"
++
++namespace ams::ldr::oc {
++
++#include "mtc_timing_table.hpp"
++
++enum MtcConfig: u32 {
++    AUTO_ADJ_SAFE_MARIKO_ONLY = 0,
++    AUTO_ADJ_4266_MARIKO_ONLY = 1,
++    NO_ADJ_ALL = 2,
++    CUSTOMIZED_ALL = 3,
++};
++
++using CustomizeCpuDvfsTable = pcv::cvb_entry_t[pcv::DvfsTableEntryLimit];
++using CustomizeGpuDvfsTable = pcv::cvb_entry_t[pcv::DvfsTableEntryLimit];
++static_assert(sizeof(CustomizeCpuDvfsTable) == sizeof(CustomizeGpuDvfsTable));
++static_assert(sizeof(CustomizeCpuDvfsTable) == sizeof(pcv::cvb_entry_t) * pcv::DvfsTableEntryLimit);
++
++constexpr uint32_t ERISTA_MTC_MAGIC = 0x43544D45; // EMTC
++constexpr uint32_t MARIKO_MTC_MAGIC = 0x43544D4D; // MMTC
++
++typedef struct CustomizeTable {
++    u8  cust[4] = {'C', 'U', 'S', 'T'};
++    u32 custRev = CUST_REV;
++    u32 mtcConf;
++    u32 commonCpuBoostClock;
++    u32 commonEmcMemVolt;
++    u32 eristaCpuMaxVolt;
++    u32 eristaEmcMaxClock;
++    u32 marikoCpuMaxVolt;
++    u32 marikoEmcMaxClock;
++    u32 marikoEmcVddqVolt;
++    CustomizeCpuDvfsTable eristaCpuDvfsTable;
++    CustomizeCpuDvfsTable marikoCpuDvfsTable;
++    CustomizeGpuDvfsTable eristaGpuDvfsTable;
++    CustomizeGpuDvfsTable marikoGpuDvfsTable;
++    EristaMtcTable* eristaMtcTable;
++    MarikoMtcTable* marikoMtcTable;
++} CustomizeTable;
++static_assert(sizeof(CustomizeTable) == sizeof(u8) * 4 + sizeof(u32) * 9 + sizeof(CustomizeCpuDvfsTable) * 4 + sizeof(void*) * 2);
++static_assert(sizeof(CustomizeTable) == 7000);
++
++extern volatile CustomizeTable C;
++
++extern volatile EristaMtcTable EristaMtcTablePlaceholder;
++extern volatile MarikoMtcTable MarikoMtcTablePlaceholder;
++
++}
+\ No newline at end of file
+diff --git a/stratosphere/loader/source/oc/mtc_timing_table.hpp b/stratosphere/loader/source/oc/mtc_timing_table.hpp
+new file mode 100644
+index 000000000..d1667c84e
+--- /dev/null
++++ b/stratosphere/loader/source/oc/mtc_timing_table.hpp
+@@ -0,0 +1,1248 @@
++/*
++ * Copyright (c) Atmosphère-NX
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ *
++ * from GCC preprocessor output
++ */
++
++#pragma once
++
++struct MarikoTiming {
++    uint32_t emc_rc;
++    uint32_t emc_rfc;
++    uint32_t emc_rfcpb;
++    uint32_t emc_refctrl2;
++    uint32_t emc_rfc_slr;
++    uint32_t emc_ras;
++    uint32_t emc_rp;
++    uint32_t emc_r2w;
++    uint32_t emc_w2r;
++    uint32_t emc_r2p;
++    uint32_t emc_w2p;
++    uint32_t emc_r2r;
++    uint32_t emc_tppd;
++    uint32_t emc_trtm;
++    uint32_t emc_twtm;
++    uint32_t emc_tratm;
++    uint32_t emc_twatm;
++    uint32_t emc_tr2ref;
++    uint32_t emc_ccdmw;
++    uint32_t emc_rd_rcd;
++    uint32_t emc_wr_rcd;
++    uint32_t emc_rrd;
++    uint32_t emc_rext;
++    uint32_t emc_wext;
++    uint32_t emc_wdv_chk;
++    uint32_t emc_wdv;
++    uint32_t emc_wsv;
++    uint32_t emc_wev;
++    uint32_t emc_wdv_mask;
++    uint32_t emc_ws_duration;
++    uint32_t emc_we_duration;
++    uint32_t emc_quse;
++    uint32_t emc_quse_width;
++    uint32_t emc_ibdly;
++    uint32_t emc_obdly;
++    uint32_t emc_einput;
++    uint32_t emc_mrw6;
++    uint32_t emc_einput_duration;
++    uint32_t emc_puterm_extra;
++    uint32_t emc_puterm_width;
++    uint32_t emc_qrst;
++    uint32_t emc_qsafe;
++    uint32_t emc_rdv;
++    uint32_t emc_rdv_mask;
++    uint32_t emc_rdv_early;
++    uint32_t emc_rdv_early_mask;
++    uint32_t emc_refresh;
++    uint32_t emc_burst_refresh_num;
++    uint32_t emc_pre_refresh_req_cnt;
++    uint32_t emc_pdex2wr;
++    uint32_t emc_pdex2rd;
++    uint32_t emc_pchg2pden;
++    uint32_t emc_act2pden;
++    uint32_t emc_ar2pden;
++    uint32_t emc_rw2pden;
++    uint32_t emc_cke2pden;
++    uint32_t emc_pdex2cke;
++    uint32_t emc_pdex2mrr;
++    uint32_t emc_txsr;
++    uint32_t emc_txsrdll;
++    uint32_t emc_tcke;
++    uint32_t emc_tckesr;
++    uint32_t emc_tpd;
++    uint32_t emc_tfaw;
++    uint32_t emc_trpab;
++    uint32_t emc_tclkstable;
++    uint32_t emc_tclkstop;
++    uint32_t emc_mrw7;
++    uint32_t emc_trefbw;
++    uint32_t emc_odt_write;
++    uint32_t emc_fbio_cfg5;
++    uint32_t emc_fbio_cfg7;
++    uint32_t emc_cfg_dig_dll;
++    uint32_t emc_cfg_dig_dll_period;
++    uint32_t emc_pmacro_ib_rxrt;
++    uint32_t emc_cfg_pipe_1;
++    uint32_t emc_cfg_pipe_2;
++    uint32_t emc_pmacro_quse_ddll_rank0_4;
++    uint32_t emc_pmacro_quse_ddll_rank0_5;
++    uint32_t emc_pmacro_quse_ddll_rank1_4;
++    uint32_t emc_pmacro_quse_ddll_rank1_5;
++    uint32_t emc_mrw8;
++    uint32_t emc_pmacro_ob_ddll_long_dq_rank1_4;
++    uint32_t emc_pmacro_ob_ddll_long_dq_rank1_5;
++    uint32_t emc_pmacro_ob_ddll_long_dqs_rank0_0;
++    uint32_t emc_pmacro_ob_ddll_long_dqs_rank0_1;
++    uint32_t emc_pmacro_ob_ddll_long_dqs_rank0_2;
++    uint32_t emc_pmacro_ob_ddll_long_dqs_rank0_3;
++    uint32_t emc_pmacro_ob_ddll_long_dqs_rank0_4;
++    uint32_t emc_pmacro_ob_ddll_long_dqs_rank0_5;
++    uint32_t emc_pmacro_ob_ddll_long_dqs_rank1_0;
++    uint32_t emc_pmacro_ob_ddll_long_dqs_rank1_1;
++    uint32_t emc_pmacro_ob_ddll_long_dqs_rank1_2;
++    uint32_t emc_pmacro_ob_ddll_long_dqs_rank1_3;
++    uint32_t emc_pmacro_ob_ddll_long_dqs_rank1_4;
++    uint32_t emc_pmacro_ob_ddll_long_dqs_rank1_5;
++    uint32_t emc_pmacro_ddll_long_cmd_0;
++    uint32_t emc_pmacro_ddll_long_cmd_1;
++    uint32_t emc_pmacro_ddll_long_cmd_2;
++    uint32_t emc_pmacro_ddll_long_cmd_3;
++    uint32_t emc_pmacro_ddll_long_cmd_4;
++    uint32_t emc_pmacro_ddll_short_cmd_0;
++    uint32_t emc_pmacro_ddll_short_cmd_1;
++    uint32_t emc_pmacro_ddll_short_cmd_2;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte0_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte1_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte2_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte3_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte4_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte5_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte6_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte7_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd0_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd1_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd2_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd3_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte0_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte1_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte2_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte3_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte4_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte5_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte6_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte7_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd0_0;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd0_1;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd0_2;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd0_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd1_0;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd1_1;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd1_2;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd1_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd2_0;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd2_1;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd2_2;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd2_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd3_0;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd3_1;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd3_2;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd3_3;
++    uint32_t emc_txdsrvttgen;
++    uint32_t emc_fdpd_ctrl_dq;
++    uint32_t emc_fdpd_ctrl_cmd;
++    uint32_t emc_fbio_spare;
++    uint32_t emc_zcal_interval;
++    uint32_t emc_zcal_wait_cnt;
++    uint32_t emc_mrs_wait_cnt;
++    uint32_t emc_mrs_wait_cnt2;
++    uint32_t emc_auto_cal_channel;
++    uint32_t emc_pmacro_dll_cfg_0;
++    uint32_t emc_pmacro_dll_cfg_1;
++    uint32_t emc_pmacro_dll_cfg_2;
++    uint32_t emc_pmacro_autocal_cfg_common;
++    uint32_t emc_pmacro_zctrl;
++    uint32_t emc_cfg;
++    uint32_t emc_cfg_pipe;
++    uint32_t emc_dyn_self_ref_control;
++    uint32_t emc_qpop;
++    uint32_t emc_dqs_brlshft_0;
++    uint32_t emc_dqs_brlshft_1;
++    uint32_t emc_cmd_brlshft_2;
++    uint32_t emc_cmd_brlshft_3;
++    uint32_t emc_pmacro_pad_cfg_ctrl;
++    uint32_t emc_pmacro_data_pad_rx_ctrl;
++    uint32_t emc_pmacro_cmd_pad_rx_ctrl;
++    uint32_t emc_pmacro_data_rx_term_mode;
++    uint32_t emc_pmacro_cmd_rx_term_mode;
++    uint32_t emc_pmacro_cmd_pad_tx_ctrl;
++    uint32_t emc_pmacro_data_pad_tx_ctrl;
++    uint32_t emc_pmacro_vttgen_ctrl_0;
++    uint32_t emc_pmacro_vttgen_ctrl_1;
++    uint32_t emc_pmacro_vttgen_ctrl_2;
++    uint32_t emc_pmacro_brick_ctrl_rfu1;
++    uint32_t emc_pmacro_cmd_brick_ctrl_fdpd;
++    uint32_t emc_pmacro_brick_ctrl_rfu2;
++    uint32_t emc_pmacro_data_brick_ctrl_fdpd;
++    uint32_t emc_pmacro_bg_bias_ctrl_0;
++    uint32_t emc_cfg_3;
++    uint32_t emc_pmacro_tx_pwrd_0;
++    uint32_t emc_pmacro_tx_pwrd_1;
++    uint32_t emc_pmacro_tx_pwrd_2;
++    uint32_t emc_pmacro_tx_pwrd_3;
++    uint32_t emc_pmacro_tx_pwrd_4;
++    uint32_t emc_pmacro_tx_pwrd_5;
++    uint32_t emc_config_sample_delay;
++    uint32_t emc_pmacro_tx_sel_clk_src_0;
++    uint32_t emc_pmacro_tx_sel_clk_src_1;
++    uint32_t emc_pmacro_tx_sel_clk_src_2;
++    uint32_t emc_pmacro_tx_sel_clk_src_3;
++    uint32_t emc_pmacro_tx_sel_clk_src_4;
++    uint32_t emc_pmacro_tx_sel_clk_src_5;
++    uint32_t emc_pmacro_ddll_bypass;
++    uint32_t emc_pmacro_ddll_pwrd_0;
++    uint32_t emc_pmacro_ddll_pwrd_1;
++    uint32_t emc_pmacro_ddll_pwrd_2;
++    uint32_t emc_pmacro_cmd_ctrl_0;
++    uint32_t emc_pmacro_cmd_ctrl_1;
++    uint32_t emc_pmacro_cmd_ctrl_2;
++    uint32_t emc_pmacro_data_pi_ctrl;
++    uint32_t emc_pmacro_cmd_pi_ctrl;
++    uint32_t emc_tr_timing_0;
++    uint32_t emc_tr_dvfs;
++    uint32_t emc_tr_ctrl_1;
++    uint32_t emc_tr_rdv;
++    uint32_t emc_tr_qpop;
++    uint32_t emc_tr_rdv_mask;
++    uint32_t emc_mrw14;
++    uint32_t emc_tr_qsafe;
++    uint32_t emc_tr_qrst;
++    uint32_t emc_training_ctrl;
++    uint32_t emc_training_settle;
++    uint32_t emc_training_vref_settle;
++    uint32_t emc_training_ca_fine_ctrl;
++    uint32_t emc_training_ca_ctrl_misc;
++    uint32_t emc_training_ca_ctrl_misc1;
++    uint32_t emc_training_ca_vref_ctrl;
++    uint32_t emc_training_quse_cors_ctrl;
++    uint32_t emc_training_quse_fine_ctrl;
++    uint32_t emc_training_quse_ctrl_misc;
++    uint32_t emc_training_quse_vref_ctrl;
++    uint32_t emc_training_read_fine_ctrl;
++    uint32_t emc_training_read_ctrl_misc;
++    uint32_t emc_training_read_vref_ctrl;
++    uint32_t emc_training_write_fine_ctrl;
++    uint32_t emc_training_write_ctrl_misc;
++    uint32_t emc_training_write_vref_ctrl;
++    uint32_t emc_training_mpc;
++    uint32_t emc_mrw15;
++};
++
++struct EristaTiming {
++    uint32_t emc_rc;
++    uint32_t emc_rfc;
++    uint32_t emc_rfcpb;
++    uint32_t emc_refctrl2;
++    uint32_t emc_rfc_slr;
++    uint32_t emc_ras;
++    uint32_t emc_rp;
++    uint32_t emc_r2w;
++    uint32_t emc_w2r;
++    uint32_t emc_r2p;
++    uint32_t emc_w2p;
++    uint32_t emc_r2r;
++    uint32_t emc_tppd;
++    uint32_t emc_ccdmw;
++    uint32_t emc_rd_rcd;
++    uint32_t emc_wr_rcd;
++    uint32_t emc_rrd;
++    uint32_t emc_rext;
++    uint32_t emc_wext;
++    uint32_t emc_wdv_chk;
++    uint32_t emc_wdv;
++    uint32_t emc_wsv;
++    uint32_t emc_wev;
++    uint32_t emc_wdv_mask;
++    uint32_t emc_ws_duration;
++    uint32_t emc_we_duration;
++    uint32_t emc_quse;
++    uint32_t emc_quse_width;
++    uint32_t emc_ibdly;
++    uint32_t emc_obdly;
++    uint32_t emc_einput;
++    uint32_t emc_mrw6;
++    uint32_t emc_einput_duration;
++    uint32_t emc_puterm_extra;
++    uint32_t emc_puterm_width;
++    uint32_t emc_qrst;
++    uint32_t emc_qsafe;
++    uint32_t emc_rdv;
++    uint32_t emc_rdv_mask;
++    uint32_t emc_rdv_early;
++    uint32_t emc_rdv_early_mask;
++    uint32_t emc_refresh;
++    uint32_t emc_burst_refresh_num;
++    uint32_t emc_pre_refresh_req_cnt;
++    uint32_t emc_pdex2wr;
++    uint32_t emc_pdex2rd;
++    uint32_t emc_pchg2pden;
++    uint32_t emc_act2pden;
++    uint32_t emc_ar2pden;
++    uint32_t emc_rw2pden;
++    uint32_t emc_cke2pden;
++    uint32_t emc_pdex2cke;
++    uint32_t emc_pdex2mrr;
++    uint32_t emc_txsr;
++    uint32_t emc_txsrdll;
++    uint32_t emc_tcke;
++    uint32_t emc_tckesr;
++    uint32_t emc_tpd;
++    uint32_t emc_tfaw;
++    uint32_t emc_trpab;
++    uint32_t emc_tclkstable;
++    uint32_t emc_tclkstop;
++    uint32_t emc_mrw7;
++    uint32_t emc_trefbw;
++    uint32_t emc_odt_write;
++    uint32_t emc_fbio_cfg5;
++    uint32_t emc_fbio_cfg7;
++    uint32_t emc_cfg_dig_dll;
++    uint32_t emc_cfg_dig_dll_period;
++    uint32_t emc_pmacro_ib_rxrt;
++    uint32_t emc_cfg_pipe_1;
++    uint32_t emc_cfg_pipe_2;
++    uint32_t emc_pmacro_quse_ddll_rank0_4;
++    uint32_t emc_pmacro_quse_ddll_rank0_5;
++    uint32_t emc_pmacro_quse_ddll_rank1_4;
++    uint32_t emc_pmacro_quse_ddll_rank1_5;
++    uint32_t emc_mrw8;
++    uint32_t emc_pmacro_ob_ddll_long_dq_rank1_4;
++    uint32_t emc_pmacro_ob_ddll_long_dq_rank1_5;
++    uint32_t emc_pmacro_ob_ddll_long_dqs_rank0_0;
++    uint32_t emc_pmacro_ob_ddll_long_dqs_rank0_1;
++    uint32_t emc_pmacro_ob_ddll_long_dqs_rank0_2;
++    uint32_t emc_pmacro_ob_ddll_long_dqs_rank0_3;
++    uint32_t emc_pmacro_ob_ddll_long_dqs_rank0_4;
++    uint32_t emc_pmacro_ob_ddll_long_dqs_rank0_5;
++    uint32_t emc_pmacro_ob_ddll_long_dqs_rank1_0;
++    uint32_t emc_pmacro_ob_ddll_long_dqs_rank1_1;
++    uint32_t emc_pmacro_ob_ddll_long_dqs_rank1_2;
++    uint32_t emc_pmacro_ob_ddll_long_dqs_rank1_3;
++    uint32_t emc_pmacro_ob_ddll_long_dqs_rank1_4;
++    uint32_t emc_pmacro_ob_ddll_long_dqs_rank1_5;
++    uint32_t emc_pmacro_ddll_long_cmd_0;
++    uint32_t emc_pmacro_ddll_long_cmd_1;
++    uint32_t emc_pmacro_ddll_long_cmd_2;
++    uint32_t emc_pmacro_ddll_long_cmd_3;
++    uint32_t emc_pmacro_ddll_long_cmd_4;
++    uint32_t emc_pmacro_ddll_short_cmd_0;
++    uint32_t emc_pmacro_ddll_short_cmd_1;
++    uint32_t emc_pmacro_ddll_short_cmd_2;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte0_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte1_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte2_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte3_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte4_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte5_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte6_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte7_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd0_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd1_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd2_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd3_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte0_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte1_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte2_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte3_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte4_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte5_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte6_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte7_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd0_0;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd0_1;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd0_2;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd0_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd1_0;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd1_1;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd1_2;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd1_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd2_0;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd2_1;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd2_2;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd2_3;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd3_0;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd3_1;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd3_2;
++    uint32_t emc_pmacro_ob_ddll_short_dq_rank1_cmd3_3;
++    uint32_t emc_txdsrvttgen;
++    uint32_t emc_fdpd_ctrl_dq;
++    uint32_t emc_fdpd_ctrl_cmd;
++    uint32_t emc_fbio_spare;
++    uint32_t emc_zcal_interval;
++    uint32_t emc_zcal_wait_cnt;
++    uint32_t emc_mrs_wait_cnt;
++    uint32_t emc_mrs_wait_cnt2;
++    uint32_t emc_auto_cal_channel;
++    uint32_t emc_dll_cfg_0;
++    uint32_t emc_dll_cfg_1;
++    uint32_t emc_pmacro_autocal_cfg_common;
++    uint32_t emc_pmacro_zctrl;
++    uint32_t emc_cfg;
++    uint32_t emc_cfg_pipe;
++    uint32_t emc_dyn_self_ref_control;
++    uint32_t emc_qpop;
++    uint32_t emc_dqs_brlshft_0;
++    uint32_t emc_dqs_brlshft_1;
++    uint32_t emc_cmd_brlshft_2;
++    uint32_t emc_cmd_brlshft_3;
++    uint32_t emc_pmacro_pad_cfg_ctrl;
++    uint32_t emc_pmacro_data_pad_rx_ctrl;
++    uint32_t emc_pmacro_cmd_pad_rx_ctrl;
++    uint32_t emc_pmacro_data_rx_term_mode;
++    uint32_t emc_pmacro_cmd_rx_term_mode;
++    uint32_t emc_pmacro_cmd_pad_tx_ctrl;
++    uint32_t emc_pmacro_data_pad_tx_ctrl;
++    uint32_t emc_pmacro_common_pad_tx_ctrl;
++    uint32_t emc_pmacro_vttgen_ctrl_0;
++    uint32_t emc_pmacro_vttgen_ctrl_1;
++    uint32_t emc_pmacro_vttgen_ctrl_2;
++    uint32_t emc_pmacro_brick_ctrl_rfu1;
++    uint32_t emc_pmacro_cmd_brick_ctrl_fdpd;
++    uint32_t emc_pmacro_brick_ctrl_rfu2;
++    uint32_t emc_pmacro_data_brick_ctrl_fdpd;
++    uint32_t emc_pmacro_bg_bias_ctrl_0;
++    uint32_t emc_cfg_3;
++    uint32_t emc_pmacro_tx_pwrd_0;
++    uint32_t emc_pmacro_tx_pwrd_1;
++    uint32_t emc_pmacro_tx_pwrd_2;
++    uint32_t emc_pmacro_tx_pwrd_3;
++    uint32_t emc_pmacro_tx_pwrd_4;
++    uint32_t emc_pmacro_tx_pwrd_5;
++    uint32_t emc_config_sample_delay;
++    uint32_t emc_pmacro_tx_sel_clk_src_0;
++    uint32_t emc_pmacro_tx_sel_clk_src_1;
++    uint32_t emc_pmacro_tx_sel_clk_src_2;
++    uint32_t emc_pmacro_tx_sel_clk_src_3;
++    uint32_t emc_pmacro_tx_sel_clk_src_4;
++    uint32_t emc_pmacro_tx_sel_clk_src_5;
++    uint32_t emc_pmacro_ddll_bypass;
++    uint32_t emc_pmacro_ddll_pwrd_0;
++    uint32_t emc_pmacro_ddll_pwrd_1;
++    uint32_t emc_pmacro_ddll_pwrd_2;
++    uint32_t emc_pmacro_cmd_ctrl_0;
++    uint32_t emc_pmacro_cmd_ctrl_1;
++    uint32_t emc_pmacro_cmd_ctrl_2;
++    uint32_t emc_tr_timing_0;
++    uint32_t emc_tr_dvfs;
++    uint32_t emc_tr_ctrl_1;
++    uint32_t emc_tr_rdv;
++    uint32_t emc_tr_qpop;
++    uint32_t emc_tr_rdv_mask;
++    uint32_t emc_mrw14;
++    uint32_t emc_tr_qsafe;
++    uint32_t emc_tr_qrst;
++    uint32_t emc_training_ctrl;
++    uint32_t emc_training_settle;
++    uint32_t emc_training_vref_settle;
++    uint32_t emc_training_ca_fine_ctrl;
++    uint32_t emc_training_ca_ctrl_misc;
++    uint32_t emc_training_ca_ctrl_misc1;
++    uint32_t emc_training_ca_vref_ctrl;
++    uint32_t emc_training_quse_cors_ctrl;
++    uint32_t emc_training_quse_fine_ctrl;
++    uint32_t emc_training_quse_ctrl_misc;
++    uint32_t emc_training_quse_vref_ctrl;
++    uint32_t emc_training_read_fine_ctrl;
++    uint32_t emc_training_read_ctrl_misc;
++    uint32_t emc_training_read_vref_ctrl;
++    uint32_t emc_training_write_fine_ctrl;
++    uint32_t emc_training_write_ctrl_misc;
++    uint32_t emc_training_write_vref_ctrl;
++    uint32_t emc_training_mpc;
++    uint32_t emc_mrw15;
++};
++
++struct MarikoMtcTable {
++    uint32_t rev;
++    char dvfs_ver[60];
++    uint32_t rate_khz;
++    uint32_t min_volt;
++    uint32_t gpu_min_volt;
++    char clock_src[32];
++    uint32_t clk_src_emc;
++    uint32_t pll_en_ssc;
++    uint32_t needs_training;
++    uint32_t training_pattern;
++    uint32_t trained;
++
++    uint32_t periodic_training;
++    uint32_t trained_dram_clktree_c0d0u0;
++    uint32_t trained_dram_clktree_c0d0u1;
++    uint32_t trained_dram_clktree_c0d1u0;
++    uint32_t trained_dram_clktree_c0d1u1;
++    uint32_t trained_dram_clktree_c1d0u0;
++    uint32_t trained_dram_clktree_c1d0u1;
++    uint32_t trained_dram_clktree_c1d1u0;
++    uint32_t trained_dram_clktree_c1d1u1;
++    uint32_t current_dram_clktree_c0d0u0;
++    uint32_t current_dram_clktree_c0d0u1;
++    uint32_t current_dram_clktree_c0d1u0;
++    uint32_t current_dram_clktree_c0d1u1;
++    uint32_t current_dram_clktree_c1d0u0;
++    uint32_t current_dram_clktree_c1d0u1;
++    uint32_t current_dram_clktree_c1d1u0;
++    uint32_t current_dram_clktree_c1d1u1;
++    uint32_t emc_fbio_cfg7;
++    uint32_t run_clocks;
++    uint32_t tree_margin;
++
++    uint32_t num_burst;
++    uint32_t num_burst_per_ch;
++    uint32_t num_trim;
++    uint32_t num_trim_per_ch;
++    uint32_t num_mc_regs;
++    uint32_t num_up_down;
++    uint32_t vref_num;
++    uint32_t training_mod_num;
++    uint32_t dram_timing_num;
++
++    uint32_t ptfv_dqsosc_movavg_c0d0u0;
++    uint32_t ptfv_dqsosc_movavg_c0d0u1;
++    uint32_t ptfv_dqsosc_movavg_c0d1u0;
++    uint32_t ptfv_dqsosc_movavg_c0d1u1;
++    uint32_t ptfv_dqsosc_movavg_c1d0u0;
++    uint32_t ptfv_dqsosc_movavg_c1d0u1;
++    uint32_t ptfv_dqsosc_movavg_c1d1u0;
++    uint32_t ptfv_dqsosc_movavg_c1d1u1;
++    uint32_t ptfv_write_samples;
++    uint32_t ptfv_dvfs_samples;
++    uint32_t ptfv_movavg_weight;
++    uint32_t ptfv_config_ctrl;
++
++    MarikoTiming burst_regs;
++
++    struct {
++        uint32_t emc0_mrw10;
++        uint32_t emc1_mrw10;
++        uint32_t emc0_mrw11;
++        uint32_t emc1_mrw11;
++        uint32_t emc0_mrw12;
++        uint32_t emc1_mrw12;
++        uint32_t emc0_mrw13;
++        uint32_t emc1_mrw13;
++    }
++    burst_perch_regs;
++
++    MarikoTiming shadow_regs_ca_train;
++
++    MarikoTiming shadow_regs_rdwr_train;
++
++    struct {
++        uint32_t emc_pmacro_ib_ddll_long_dqs_rank0_0;
++        uint32_t emc_pmacro_ib_ddll_long_dqs_rank0_1;
++        uint32_t emc_pmacro_ib_ddll_long_dqs_rank0_2;
++        uint32_t emc_pmacro_ib_ddll_long_dqs_rank0_3;
++        uint32_t emc_pmacro_ib_ddll_long_dqs_rank1_0;
++        uint32_t emc_pmacro_ib_ddll_long_dqs_rank1_1;
++        uint32_t emc_pmacro_ib_ddll_long_dqs_rank1_2;
++        uint32_t emc_pmacro_ib_ddll_long_dqs_rank1_3;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte0_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte0_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte0_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte1_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte1_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte1_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte2_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte2_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte2_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte3_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte3_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte3_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte4_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte4_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte4_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte5_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte5_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte5_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte6_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte6_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte6_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte7_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte7_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte7_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte0_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte0_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte0_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte1_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte1_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte1_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte2_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte2_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte2_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte3_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte3_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte3_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte4_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte4_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte4_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte5_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte5_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte5_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte6_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte6_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte6_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte7_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte7_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte7_2;
++        uint32_t emc_pmacro_ib_vref_dqs_0;
++        uint32_t emc_pmacro_ib_vref_dqs_1;
++        uint32_t emc_pmacro_ib_vref_dq_0;
++        uint32_t emc_pmacro_ib_vref_dq_1;
++        uint32_t emc_pmacro_ob_ddll_long_dq_rank0_0;
++        uint32_t emc_pmacro_ob_ddll_long_dq_rank0_1;
++        uint32_t emc_pmacro_ob_ddll_long_dq_rank0_2;
++        uint32_t emc_pmacro_ob_ddll_long_dq_rank0_3;
++        uint32_t emc_pmacro_ob_ddll_long_dq_rank0_4;
++        uint32_t emc_pmacro_ob_ddll_long_dq_rank0_5;
++        uint32_t emc_pmacro_ob_ddll_long_dq_rank1_0;
++        uint32_t emc_pmacro_ob_ddll_long_dq_rank1_1;
++        uint32_t emc_pmacro_ob_ddll_long_dq_rank1_2;
++        uint32_t emc_pmacro_ob_ddll_long_dq_rank1_3;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte0_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte0_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte0_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte1_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte1_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte1_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte2_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte2_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte2_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte3_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte3_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte3_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte4_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte4_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte4_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte5_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte5_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte5_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte6_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte6_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte6_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte7_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte7_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte7_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd0_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd0_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd0_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd1_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd1_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd1_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd2_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd2_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd2_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd3_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd3_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd3_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte0_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte0_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte0_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte1_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte1_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte1_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte2_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte2_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte2_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte3_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte3_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte3_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte4_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte4_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte4_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte5_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte5_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte5_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte6_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte6_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte6_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte7_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte7_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte7_2;
++        uint32_t emc_pmacro_quse_ddll_rank0_0;
++        uint32_t emc_pmacro_quse_ddll_rank0_1;
++        uint32_t emc_pmacro_quse_ddll_rank0_2;
++        uint32_t emc_pmacro_quse_ddll_rank0_3;
++        uint32_t emc_pmacro_quse_ddll_rank1_0;
++        uint32_t emc_pmacro_quse_ddll_rank1_1;
++        uint32_t emc_pmacro_quse_ddll_rank1_2;
++        uint32_t emc_pmacro_quse_ddll_rank1_3;
++    }
++    trim_regs;
++
++    struct {
++        uint32_t emc0_cmd_brlshft_0;
++        uint32_t emc1_cmd_brlshft_1;
++        uint32_t emc0_data_brlshft_0;
++        uint32_t emc1_data_brlshft_0;
++        uint32_t emc0_data_brlshft_1;
++        uint32_t emc1_data_brlshft_1;
++        uint32_t emc0_quse_brlshft_0;
++        uint32_t emc1_quse_brlshft_1;
++        uint32_t emc0_quse_brlshft_2;
++        uint32_t emc1_quse_brlshft_3;
++    }
++    trim_perch_regs;
++
++    struct {
++        uint32_t emc0_training_opt_dqs_ib_vref_rank0;
++        uint32_t emc1_training_opt_dqs_ib_vref_rank0;
++        uint32_t emc0_training_opt_dqs_ib_vref_rank1;
++        uint32_t emc1_training_opt_dqs_ib_vref_rank1;
++    }
++    vref_perch_regs;
++
++    struct {
++        uint32_t t_rp;
++        uint32_t t_fc_lpddr4;
++        uint32_t t_rfc;
++        uint32_t t_pdex;
++        uint32_t rl;
++    }
++    dram_timings;
++
++    uint32_t zq_op_cc_long_zcal;
++    uint32_t zq_op_cc_short_zcal;
++    uint32_t zcal_wait_time_ps_cc_long_zcal;
++    uint32_t zcal_wait_time_ps_cc_short_zcal;
++    uint32_t tZQCAL_lpddr4;
++    uint32_t zqcal_before_cc_cutoff;
++    uint32_t opt_cc_short_zcal;
++    uint32_t opt_short_zcal;
++    uint32_t opt_do_sw_qrst;
++    uint32_t save_restore_clkstop_pd;
++    uint32_t opt_E90;
++    uint32_t cya_allow_ref_cc;
++    uint32_t ref_b4_sref_en;
++    uint32_t cya_issue_pc_ref;
++
++    struct {
++        uint32_t emc0_training_rw_offset_ib_byte0;
++        uint32_t emc1_training_rw_offset_ib_byte0;
++        uint32_t emc0_training_rw_offset_ib_byte1;
++        uint32_t emc1_training_rw_offset_ib_byte1;
++        uint32_t emc0_training_rw_offset_ib_byte2;
++        uint32_t emc1_training_rw_offset_ib_byte2;
++        uint32_t emc0_training_rw_offset_ib_byte3;
++        uint32_t emc1_training_rw_offset_ib_byte3;
++        uint32_t emc0_training_rw_offset_ib_misc;
++        uint32_t emc1_training_rw_offset_ib_misc;
++        uint32_t emc0_training_rw_offset_ob_byte0;
++        uint32_t emc1_training_rw_offset_ob_byte0;
++        uint32_t emc0_training_rw_offset_ob_byte1;
++        uint32_t emc1_training_rw_offset_ob_byte1;
++        uint32_t emc0_training_rw_offset_ob_byte2;
++        uint32_t emc1_training_rw_offset_ob_byte2;
++        uint32_t emc0_training_rw_offset_ob_byte3;
++        uint32_t emc1_training_rw_offset_ob_byte3;
++        uint32_t emc0_training_rw_offset_ob_misc;
++        uint32_t emc1_training_rw_offset_ob_misc;
++    }
++    training_mod_regs;
++
++    uint32_t save_restore_mod_regs[12];
++
++    struct {
++        uint32_t mc_emem_arb_cfg;
++        uint32_t mc_emem_arb_outstanding_req;
++        uint32_t mc_emem_arb_refpb_hp_ctrl;
++        uint32_t mc_emem_arb_refpb_bank_ctrl;
++        uint32_t mc_emem_arb_timing_rcd;
++        uint32_t mc_emem_arb_timing_rp;
++        uint32_t mc_emem_arb_timing_rc;
++        uint32_t mc_emem_arb_timing_ras;
++        uint32_t mc_emem_arb_timing_faw;
++        uint32_t mc_emem_arb_timing_rrd;
++        uint32_t mc_emem_arb_timing_rap2pre;
++        uint32_t mc_emem_arb_timing_wap2pre;
++        uint32_t mc_emem_arb_timing_r2r;
++        uint32_t mc_emem_arb_timing_w2w;
++        uint32_t mc_emem_arb_timing_r2w;
++        uint32_t mc_emem_arb_timing_ccdmw;
++        uint32_t mc_emem_arb_timing_w2r;
++        uint32_t mc_emem_arb_timing_rfcpb;
++        uint32_t mc_emem_arb_da_turns;
++        uint32_t mc_emem_arb_da_covers;
++        uint32_t mc_emem_arb_misc0;
++        uint32_t mc_emem_arb_misc1;
++        uint32_t mc_emem_arb_misc2;
++        uint32_t mc_emem_arb_ring1_throttle;
++        uint32_t mc_emem_arb_dhyst_ctrl;
++        uint32_t mc_emem_arb_dhyst_timeout_util_0;
++        uint32_t mc_emem_arb_dhyst_timeout_util_1;
++        uint32_t mc_emem_arb_dhyst_timeout_util_2;
++        uint32_t mc_emem_arb_dhyst_timeout_util_3;
++        uint32_t mc_emem_arb_dhyst_timeout_util_4;
++        uint32_t mc_emem_arb_dhyst_timeout_util_5;
++        uint32_t mc_emem_arb_dhyst_timeout_util_6;
++        uint32_t mc_emem_arb_dhyst_timeout_util_7;
++    }
++    burst_mc_regs;
++
++    struct {
++        uint32_t mc_mll_mpcorer_ptsa_rate;
++        uint32_t mc_ftop_ptsa_rate;
++        uint32_t mc_ptsa_grant_decrement;
++        uint32_t mc_latency_allowance_xusb_0;
++        uint32_t mc_latency_allowance_xusb_1;
++        uint32_t mc_latency_allowance_tsec_0;
++        uint32_t mc_latency_allowance_sdmmca_0;
++        uint32_t mc_latency_allowance_sdmmcaa_0;
++        uint32_t mc_latency_allowance_sdmmc_0;
++        uint32_t mc_latency_allowance_sdmmcab_0;
++        uint32_t mc_latency_allowance_ppcs_0;
++        uint32_t mc_latency_allowance_ppcs_1;
++        uint32_t mc_latency_allowance_mpcore_0;
++        uint32_t mc_latency_allowance_hc_0;
++        uint32_t mc_latency_allowance_hc_1;
++        uint32_t mc_latency_allowance_avpc_0;
++        uint32_t mc_latency_allowance_gpu_0;
++        uint32_t mc_latency_allowance_gpu2_0;
++        uint32_t mc_latency_allowance_nvenc_0;
++        uint32_t mc_latency_allowance_nvdec_0;
++        uint32_t mc_latency_allowance_vic_0;
++        uint32_t mc_latency_allowance_vi2_0;
++        uint32_t mc_latency_allowance_isp2_0;
++        uint32_t mc_latency_allowance_isp2_1;
++    }
++    la_scale_regs;
++
++    uint32_t unk_0;
++    uint32_t vtt_vdda_ctrl_0;
++    uint32_t src_clock_div;
++    uint32_t vtt_vdda_dual_channel;
++    uint32_t vtt_vdda_ctrl_1;
++    uint32_t vtt_vdda_ctrl_2;
++    uint32_t vtt_vdda_ctrl_3;
++    uint32_t vtt_vdda_ctrl_4;
++    uint32_t misc_cfg_0;
++    uint32_t misc_cfg_1;
++    uint32_t misc_cfg_2;
++    uint32_t unk_1;
++    uint32_t unk_2;
++    uint32_t pipe_clk_delay;
++    uint32_t clkchange_delay;
++    uint32_t pllm_ss_cfg;
++    uint32_t pllm_ss_ctrl1;
++    uint32_t pllm_ss_ctrl2;
++    uint32_t pllmb_ss_cfg;
++    uint32_t pllmb_ss_ctrl1;
++    uint32_t pllmb_ss_ctrl2;
++    uint32_t pllmb_divm;
++    uint32_t pllmb_divn;
++    uint32_t pllmb_divp;
++    uint32_t min_mrs_wait;
++    uint32_t ramp_wait;
++    uint32_t emc_mrw;
++    uint32_t emc_mrw2;
++    uint32_t emc_mrw3;
++    uint32_t emc_mrw4;
++    uint32_t emc_mrw9;
++    uint32_t emc_mrs;
++    uint32_t emc_emrs;
++    uint32_t emc_emrs2;
++    uint32_t emc_auto_cal_config;
++    uint32_t emc_auto_cal_config2;
++    uint32_t emc_auto_cal_config3;
++    uint32_t emc_auto_cal_config4;
++    uint32_t emc_auto_cal_config5;
++    uint32_t emc_auto_cal_config6;
++    uint32_t emc_auto_cal_config7;
++    uint32_t emc_auto_cal_config8;
++    uint32_t emc_cfg_2;
++    uint32_t emc_sel_dpd_ctrl;
++    uint32_t emc_fdpd_ctrl_cmd_no_ramp;
++    uint32_t emc_tr_ctrl_0;
++    uint32_t dll_clk_src;
++    uint32_t clk_out_enb_x_0_clk_enb_emc_dll;
++    uint32_t latency;
++    uint32_t pllm_misc1_0_pllm_clamp_ph90;
++};
++
++static_assert(sizeof(MarikoMtcTable) == 0x10CC);
++
++struct EristaMtcTable {
++    uint32_t rev;
++    char dvfs_ver[60];
++    uint32_t rate_khz;
++    uint32_t min_volt;
++    uint32_t gpu_min_volt;
++    char clock_src[32];
++    uint32_t clk_src_emc;
++    uint32_t needs_training;
++    uint32_t training_pattern;
++    uint32_t trained;
++
++    uint32_t periodic_training;
++    uint32_t trained_dram_clktree_c0d0u0;
++    uint32_t trained_dram_clktree_c0d0u1;
++    uint32_t trained_dram_clktree_c0d1u0;
++    uint32_t trained_dram_clktree_c0d1u1;
++    uint32_t trained_dram_clktree_c1d0u0;
++    uint32_t trained_dram_clktree_c1d0u1;
++    uint32_t trained_dram_clktree_c1d1u0;
++    uint32_t trained_dram_clktree_c1d1u1;
++    uint32_t current_dram_clktree_c0d0u0;
++    uint32_t current_dram_clktree_c0d0u1;
++    uint32_t current_dram_clktree_c0d1u0;
++    uint32_t current_dram_clktree_c0d1u1;
++    uint32_t current_dram_clktree_c1d0u0;
++    uint32_t current_dram_clktree_c1d0u1;
++    uint32_t current_dram_clktree_c1d1u0;
++    uint32_t current_dram_clktree_c1d1u1;
++    uint32_t run_clocks;
++    uint32_t tree_margin;
++
++    uint32_t num_burst;
++    uint32_t num_burst_per_ch;
++    uint32_t num_trim;
++    uint32_t num_trim_per_ch;
++    uint32_t num_mc_regs;
++    uint32_t num_up_down;
++    uint32_t vref_num;
++    uint32_t training_mod_num;
++    uint32_t dram_timing_num;
++
++    uint32_t ptfv_dqsosc_movavg_c0d0u0;
++    uint32_t ptfv_dqsosc_movavg_c0d0u1;
++    uint32_t ptfv_dqsosc_movavg_c0d1u0;
++    uint32_t ptfv_dqsosc_movavg_c0d1u1;
++    uint32_t ptfv_dqsosc_movavg_c1d0u0;
++    uint32_t ptfv_dqsosc_movavg_c1d0u1;
++    uint32_t ptfv_dqsosc_movavg_c1d1u0;
++    uint32_t ptfv_dqsosc_movavg_c1d1u1;
++    uint32_t ptfv_write_samples;
++    uint32_t ptfv_dvfs_samples;
++    uint32_t ptfv_movavg_weight;
++    uint32_t ptfv_config_ctrl;
++
++    EristaTiming burst_regs;
++
++    struct {
++        uint32_t emc0_mrw10;
++        uint32_t emc1_mrw10;
++        uint32_t emc0_mrw11;
++        uint32_t emc1_mrw11;
++        uint32_t emc0_mrw12;
++        uint32_t emc1_mrw12;
++        uint32_t emc0_mrw13;
++        uint32_t emc1_mrw13;
++    }
++    burst_perch_regs;
++
++    EristaTiming shadow_regs_ca_train;
++
++    EristaTiming shadow_regs_quse_train;
++
++    EristaTiming shadow_regs_rdwr_train;
++
++    struct {
++        uint32_t emc_pmacro_ib_ddll_long_dqs_rank0_0;
++        uint32_t emc_pmacro_ib_ddll_long_dqs_rank0_1;
++        uint32_t emc_pmacro_ib_ddll_long_dqs_rank0_2;
++        uint32_t emc_pmacro_ib_ddll_long_dqs_rank0_3;
++        uint32_t emc_pmacro_ib_ddll_long_dqs_rank1_0;
++        uint32_t emc_pmacro_ib_ddll_long_dqs_rank1_1;
++        uint32_t emc_pmacro_ib_ddll_long_dqs_rank1_2;
++        uint32_t emc_pmacro_ib_ddll_long_dqs_rank1_3;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte0_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte0_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte0_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte1_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte1_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte1_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte2_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte2_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte2_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte3_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte3_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte3_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte4_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte4_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte4_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte5_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte5_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte5_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte6_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte6_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte6_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte7_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte7_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank0_byte7_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte0_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte0_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte0_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte1_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte1_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte1_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte2_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte2_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte2_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte3_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte3_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte3_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte4_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte4_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte4_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte5_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte5_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte5_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte6_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte6_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte6_2;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte7_0;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte7_1;
++        uint32_t emc_pmacro_ib_ddll_short_dq_rank1_byte7_2;
++        uint32_t emc_pmacro_ib_vref_dqs_0;
++        uint32_t emc_pmacro_ib_vref_dqs_1;
++        uint32_t emc_pmacro_ib_vref_dq_0;
++        uint32_t emc_pmacro_ib_vref_dq_1;
++        uint32_t emc_pmacro_ob_ddll_long_dq_rank0_0;
++        uint32_t emc_pmacro_ob_ddll_long_dq_rank0_1;
++        uint32_t emc_pmacro_ob_ddll_long_dq_rank0_2;
++        uint32_t emc_pmacro_ob_ddll_long_dq_rank0_3;
++        uint32_t emc_pmacro_ob_ddll_long_dq_rank0_4;
++        uint32_t emc_pmacro_ob_ddll_long_dq_rank0_5;
++        uint32_t emc_pmacro_ob_ddll_long_dq_rank1_0;
++        uint32_t emc_pmacro_ob_ddll_long_dq_rank1_1;
++        uint32_t emc_pmacro_ob_ddll_long_dq_rank1_2;
++        uint32_t emc_pmacro_ob_ddll_long_dq_rank1_3;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte0_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte0_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte0_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte1_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte1_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte1_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte2_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte2_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte2_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte3_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte3_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte3_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte4_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte4_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte4_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte5_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte5_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte5_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte6_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte6_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte6_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte7_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte7_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_byte7_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd0_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd0_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd0_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd1_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd1_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd1_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd2_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd2_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd2_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd3_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd3_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank0_cmd3_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte0_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte0_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte0_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte1_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte1_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte1_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte2_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte2_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte2_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte3_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte3_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte3_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte4_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte4_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte4_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte5_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte5_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte5_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte6_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte6_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte6_2;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte7_0;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte7_1;
++        uint32_t emc_pmacro_ob_ddll_short_dq_rank1_byte7_2;
++        uint32_t emc_pmacro_quse_ddll_rank0_0;
++        uint32_t emc_pmacro_quse_ddll_rank0_1;
++        uint32_t emc_pmacro_quse_ddll_rank0_2;
++        uint32_t emc_pmacro_quse_ddll_rank0_3;
++        uint32_t emc_pmacro_quse_ddll_rank1_0;
++        uint32_t emc_pmacro_quse_ddll_rank1_1;
++        uint32_t emc_pmacro_quse_ddll_rank1_2;
++        uint32_t emc_pmacro_quse_ddll_rank1_3;
++    }
++    trim_regs;
++
++    struct {
++        uint32_t emc0_cmd_brlshft_0;
++        uint32_t emc1_cmd_brlshft_1;
++        uint32_t emc0_data_brlshft_0;
++        uint32_t emc1_data_brlshft_0;
++        uint32_t emc0_data_brlshft_1;
++        uint32_t emc1_data_brlshft_1;
++        uint32_t emc0_quse_brlshft_0;
++        uint32_t emc1_quse_brlshft_1;
++        uint32_t emc0_quse_brlshft_2;
++        uint32_t emc1_quse_brlshft_3;
++    }
++    trim_perch_regs;
++
++    struct {
++        uint32_t emc0_training_opt_dqs_ib_vref_rank0;
++        uint32_t emc1_training_opt_dqs_ib_vref_rank0;
++        uint32_t emc0_training_opt_dqs_ib_vref_rank1;
++        uint32_t emc1_training_opt_dqs_ib_vref_rank1;
++    }
++    vref_perch_regs;
++
++    struct {
++        uint32_t t_rp;
++        uint32_t t_fc_lpddr4;
++        uint32_t t_rfc;
++        uint32_t t_pdex;
++        uint32_t rl;
++    }
++    dram_timings;
++
++    struct {
++        uint32_t emc0_training_rw_offset_ib_byte0;
++        uint32_t emc1_training_rw_offset_ib_byte0;
++        uint32_t emc0_training_rw_offset_ib_byte1;
++        uint32_t emc1_training_rw_offset_ib_byte1;
++        uint32_t emc0_training_rw_offset_ib_byte2;
++        uint32_t emc1_training_rw_offset_ib_byte2;
++        uint32_t emc0_training_rw_offset_ib_byte3;
++        uint32_t emc1_training_rw_offset_ib_byte3;
++        uint32_t emc0_training_rw_offset_ib_misc;
++        uint32_t emc1_training_rw_offset_ib_misc;
++        uint32_t emc0_training_rw_offset_ob_byte0;
++        uint32_t emc1_training_rw_offset_ob_byte0;
++        uint32_t emc0_training_rw_offset_ob_byte1;
++        uint32_t emc1_training_rw_offset_ob_byte1;
++        uint32_t emc0_training_rw_offset_ob_byte2;
++        uint32_t emc1_training_rw_offset_ob_byte2;
++        uint32_t emc0_training_rw_offset_ob_byte3;
++        uint32_t emc1_training_rw_offset_ob_byte3;
++        uint32_t emc0_training_rw_offset_ob_misc;
++        uint32_t emc1_training_rw_offset_ob_misc;
++    }
++    training_mod_regs;
++
++    uint32_t save_restore_mod_regs[12];
++
++    struct {
++        uint32_t mc_emem_arb_cfg;
++        uint32_t mc_emem_arb_outstanding_req;
++        uint32_t mc_emem_arb_refpb_hp_ctrl;
++        uint32_t mc_emem_arb_refpb_bank_ctrl;
++        uint32_t mc_emem_arb_timing_rcd;
++        uint32_t mc_emem_arb_timing_rp;
++        uint32_t mc_emem_arb_timing_rc;
++        uint32_t mc_emem_arb_timing_ras;
++        uint32_t mc_emem_arb_timing_faw;
++        uint32_t mc_emem_arb_timing_rrd;
++        uint32_t mc_emem_arb_timing_rap2pre;
++        uint32_t mc_emem_arb_timing_wap2pre;
++        uint32_t mc_emem_arb_timing_r2r;
++        uint32_t mc_emem_arb_timing_w2w;
++        uint32_t mc_emem_arb_timing_r2w;
++        uint32_t mc_emem_arb_timing_ccdmw;
++        uint32_t mc_emem_arb_timing_w2r;
++        uint32_t mc_emem_arb_timing_rfcpb;
++        uint32_t mc_emem_arb_da_turns;
++        uint32_t mc_emem_arb_da_covers;
++        uint32_t mc_emem_arb_misc0;
++        uint32_t mc_emem_arb_misc1;
++        uint32_t mc_emem_arb_misc2;
++        uint32_t mc_emem_arb_ring1_throttle;
++        uint32_t mc_emem_arb_dhyst_ctrl;
++        uint32_t mc_emem_arb_dhyst_timeout_util_0;
++        uint32_t mc_emem_arb_dhyst_timeout_util_1;
++        uint32_t mc_emem_arb_dhyst_timeout_util_2;
++        uint32_t mc_emem_arb_dhyst_timeout_util_3;
++        uint32_t mc_emem_arb_dhyst_timeout_util_4;
++        uint32_t mc_emem_arb_dhyst_timeout_util_5;
++        uint32_t mc_emem_arb_dhyst_timeout_util_6;
++        uint32_t mc_emem_arb_dhyst_timeout_util_7;
++    }
++    burst_mc_regs;
++
++    struct {
++        uint32_t mc_mll_mpcorer_ptsa_rate;
++        uint32_t mc_ftop_ptsa_rate;
++        uint32_t mc_ptsa_grant_decrement;
++        uint32_t mc_latency_allowance_xusb_0;
++        uint32_t mc_latency_allowance_xusb_1;
++        uint32_t mc_latency_allowance_tsec_0;
++        uint32_t mc_latency_allowance_sdmmca_0;
++        uint32_t mc_latency_allowance_sdmmcaa_0;
++        uint32_t mc_latency_allowance_sdmmc_0;
++        uint32_t mc_latency_allowance_sdmmcab_0;
++        uint32_t mc_latency_allowance_ppcs_0;
++        uint32_t mc_latency_allowance_ppcs_1;
++        uint32_t mc_latency_allowance_mpcore_0;
++        uint32_t mc_latency_allowance_hc_0;
++        uint32_t mc_latency_allowance_hc_1;
++        uint32_t mc_latency_allowance_avpc_0;
++        uint32_t mc_latency_allowance_gpu_0;
++        uint32_t mc_latency_allowance_gpu2_0;
++        uint32_t mc_latency_allowance_nvenc_0;
++        uint32_t mc_latency_allowance_nvdec_0;
++        uint32_t mc_latency_allowance_vic_0;
++        uint32_t mc_latency_allowance_vi2_0;
++        uint32_t mc_latency_allowance_isp2_0;
++        uint32_t mc_latency_allowance_isp2_1;
++    }
++    la_scale_regs;
++
++    uint32_t min_mrs_wait;
++    uint32_t emc_mrw;
++    uint32_t emc_mrw2;
++    uint32_t emc_mrw3;
++    uint32_t emc_mrw4;
++    uint32_t emc_mrw9;
++    uint32_t emc_mrs;
++    uint32_t emc_emrs;
++    uint32_t emc_emrs2;
++    uint32_t emc_auto_cal_config;
++    uint32_t emc_auto_cal_config2;
++    uint32_t emc_auto_cal_config3;
++    uint32_t emc_auto_cal_config4;
++    uint32_t emc_auto_cal_config5;
++    uint32_t emc_auto_cal_config6;
++    uint32_t emc_auto_cal_config7;
++    uint32_t emc_auto_cal_config8;
++    uint32_t emc_cfg_2;
++    uint32_t emc_sel_dpd_ctrl;
++    uint32_t emc_fdpd_ctrl_cmd_no_ramp;
++    uint32_t dll_clk_src;
++    uint32_t clk_out_enb_x_0_clk_enb_emc_dll;
++    uint32_t latency;
++};
++
++static_assert(sizeof(EristaMtcTable) == 0x1340);
+diff --git a/stratosphere/loader/source/oc/oc_common.hpp b/stratosphere/loader/source/oc/oc_common.hpp
+new file mode 100644
+index 000000000..788538a9e
+--- /dev/null
++++ b/stratosphere/loader/source/oc/oc_common.hpp
+@@ -0,0 +1,99 @@
++/*
++ * Copyright (C) Switch-OC-Suite
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#pragma once
++
++#ifdef ATMOSPHERE_IS_STRATOSPHERE
++    #include <stratosphere.hpp>
++    #include <vapours/results/results_common.hpp>
++    #define LOGGING(fmt, ...) ((void)0)
++    #define CRASH(msg, ...) { ams::diag::AbortImpl(msg, __PRETTY_FUNCTION__, "", 0); __builtin_unreachable(); }
++#else
++    #include "oc_test.hpp"
++#endif
++
++#include "customize.hpp"
++
++#define PATCH_OFFSET(offset, value) \
++    static_assert(sizeof(__typeof__(offset)) <= sizeof(u64)); \
++    *(offset) = value;
++
++namespace ams::ldr {
++    R_DEFINE_ERROR_RESULT(OutOfRange,               1000);
++    R_DEFINE_ERROR_RESULT(InvalidMemPllmEntry,      1001);
++    R_DEFINE_ERROR_RESULT(InvalidMtcMagic,          1002);
++    R_DEFINE_ERROR_RESULT(InvalidMtcTable,          1003);
++    R_DEFINE_ERROR_RESULT(InvalidDvbTable,          1004);
++    R_DEFINE_ERROR_RESULT(InvalidCpuFreqVddEntry,   1005);
++    R_DEFINE_ERROR_RESULT(InvalidCpuDvfs,           1006);
++    R_DEFINE_ERROR_RESULT(InvalidCpuMinVolt,        1007);
++    R_DEFINE_ERROR_RESULT(InvalidGpuDvfs,           1008);
++    R_DEFINE_ERROR_RESULT(InvalidGpuFreqMaxPattern, 1009);
++    R_DEFINE_ERROR_RESULT(InvalidGpuPllEntry,       1010);
++    R_DEFINE_ERROR_RESULT(InvalidRegulatorEntry,    1011);
++    R_DEFINE_ERROR_RESULT(UninitializedPatcher,     1012);
++    R_DEFINE_ERROR_RESULT(UnsuccessfulPatcher,      1013);
++    R_DEFINE_ERROR_RESULT(SafetyCheckFailure,       1014);
++}
++
++namespace ams::ldr::oc {
++    template<typename Pointer>
++    struct PatcherEntry {
++        using patternFn = bool(*)(Pointer* ptr);
++        using patcherFn = Result(*)(Pointer* ptr);
++
++        const char* description;
++        patcherFn   patcher_fn = nullptr;
++        size_t      maximum_patched_count = 0;
++        patternFn   pattern_search_fn = nullptr;
++        Pointer     value_search;
++
++        size_t      patched_count = 0;
++
++        Result Apply(Pointer* ptr) {
++            Result res = patcher_fn(ptr);
++            if (R_SUCCEEDED(res))
++                patched_count++;
++
++            return res;
++        }
++
++        Result SearchAndApply(Pointer* ptr) {
++            bool searchOk = false;
++            if (pattern_search_fn) {
++                if (pattern_search_fn(ptr)) searchOk = true;
++            } else {
++                if (value_search == *(ptr)) searchOk = true;
++            }
++
++            if (searchOk)
++                return Apply(ptr);
++
++            R_THROW(ldr::ResultUnsuccessfulPatcher());
++        }
++
++        Result CheckResult() {
++            #ifndef ATMOSPHERE_IS_STRATOSPHERE
++            R_UNLESS(patched_count > 0, ldr::ResultUnsuccessfulPatcher());
++            #endif
++
++            if (maximum_patched_count)
++                R_UNLESS(patched_count <= maximum_patched_count, ldr::ResultUnsuccessfulPatcher());
++
++            R_SUCCEED();
++        }
++    };
++}
+diff --git a/stratosphere/loader/source/oc/oc_loader.hpp b/stratosphere/loader/source/oc/oc_loader.hpp
+new file mode 100644
+index 000000000..e0445818c
+--- /dev/null
++++ b/stratosphere/loader/source/oc/oc_loader.hpp
+@@ -0,0 +1,21 @@
++/*
++ * Copyright (C) Switch-OC-Suite
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#pragma once
++
++#include "oc_common.hpp"
++#include "pcv/pcv.hpp"
++#include "ptm/ptm.hpp"
+diff --git a/stratosphere/loader/source/oc/pcv/pcv.cpp b/stratosphere/loader/source/oc/pcv/pcv.cpp
+new file mode 100644
+index 000000000..a00e5e4f7
+--- /dev/null
++++ b/stratosphere/loader/source/oc/pcv/pcv.cpp
+@@ -0,0 +1,130 @@
++/*
++ * Copyright (C) Switch-OC-Suite
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include "pcv.hpp"
++
++namespace ams::ldr::oc::pcv {
++
++Result MemFreqPllmLimit(u32* ptr) {
++    clk_pll_param* entry = reinterpret_cast<clk_pll_param *>(ptr);
++    R_UNLESS(entry->freq == entry->vco_max, ldr::ResultInvalidMemPllmEntry());
++
++    // Double the max clk simply
++    u32 max_clk = entry->freq * 2;
++    entry->freq = max_clk;
++    entry->vco_max = max_clk;
++    R_SUCCEED();
++}
++
++Result MemVoltHandler(u32* ptr) {
++    // ptr value might be default_uv or max_uv
++    regulator* entries[2] = {
++        reinterpret_cast<regulator *>(reinterpret_cast<u8 *>(ptr) - offsetof(regulator, type_1.default_uv)),
++        reinterpret_cast<regulator *>(reinterpret_cast<u8 *>(ptr) - offsetof(regulator, type_1.max_uv)),
++    };
++
++    constexpr u32 uv_step = 12'500;
++    constexpr u32 uv_min  = 600'000;
++
++    auto validator = [](regulator* entry) {
++        R_UNLESS(entry->id == 1,                    ldr::ResultInvalidRegulatorEntry());
++        R_UNLESS(entry->type == 1,                  ldr::ResultInvalidRegulatorEntry());
++        R_UNLESS(entry->type_1.volt_reg == 0x17,    ldr::ResultInvalidRegulatorEntry());
++        R_UNLESS(entry->type_1.step_uv == uv_step,  ldr::ResultInvalidRegulatorEntry());
++        R_UNLESS(entry->type_1.min_uv == uv_min,    ldr::ResultInvalidRegulatorEntry());
++        R_SUCCEED();
++    };
++
++    regulator* entry = nullptr;
++    for (auto& i : entries) {
++        if (R_SUCCEEDED(validator(i)))
++            entry = i;
++    }
++
++    R_UNLESS(entry, ldr::ResultInvalidRegulatorEntry());
++
++    u32 emc_uv = C.commonEmcMemVolt;
++    if (!emc_uv)
++        R_SKIP();
++
++    if (emc_uv % uv_step)
++        emc_uv = emc_uv / uv_step * uv_step; // rounding
++
++    PATCH_OFFSET(ptr, emc_uv);
++
++    R_SUCCEED();
++}
++
++void SafetyCheck() {
++    if (C.custRev != CUST_REV)
++        CRASH("Triggered");
++
++    struct sValidator {
++        volatile u32 value;
++        u32 min;
++        u32 max;
++        bool value_required = false;
++
++        Result check() {
++            if (!value_required && !value)
++                R_SUCCEED();
++
++            if (min && value < min)
++                R_THROW(ldr::ResultSafetyCheckFailure());
++            if (max && value > max)
++                R_THROW(ldr::ResultSafetyCheckFailure());
++
++            R_SUCCEED();
++        }
++    };
++
++    u32 eristaCpuDvfsMaxFreq = static_cast<u32>(GetDvfsTableLastEntry(C.eristaCpuDvfsTable)->freq);
++    u32 marikoCpuDvfsMaxFreq = static_cast<u32>(GetDvfsTableLastEntry(C.marikoCpuDvfsTable)->freq);
++    u32 eristaGpuDvfsMaxFreq = static_cast<u32>(GetDvfsTableLastEntry(C.eristaGpuDvfsTable)->freq);
++    u32 marikoGpuDvfsMaxFreq = static_cast<u32>(GetDvfsTableLastEntry(C.marikoGpuDvfsTable)->freq);
++
++    sValidator validators[] = {
++        { C.commonCpuBoostClock, 1020'000, 3000'000, true },
++        { C.commonEmcMemVolt,    1100'000, 1250'000 },
++        { C.eristaCpuMaxVolt,        1100,     1300 },
++        { C.eristaEmcMaxClock,   1600'000, 2400'000 },
++        { C.marikoCpuMaxVolt,        1100,     1300 },
++        { C.marikoEmcMaxClock,   1600'000, 2400'000 },
++        { C.marikoEmcVddqVolt,    550'000,  650'000 },
++        { eristaCpuDvfsMaxFreq,  1785'000, 3000'000 },
++        { marikoCpuDvfsMaxFreq,  1785'000, 3000'000 },
++        { eristaGpuDvfsMaxFreq,   768'000, 1536'000 },
++        { marikoGpuDvfsMaxFreq,   768'000, 1536'000 },
++    };
++
++    for (auto& i : validators) {
++        if (R_FAILED(i.check()))
++            CRASH("Triggered");
++    }
++}
++
++void Patch(uintptr_t mapped_nso, size_t nso_size) {
++    #ifdef ATMOSPHERE_IS_STRATOSPHERE
++    SafetyCheck();
++    bool isMariko = (spl::GetSocType() == spl::SocType_Mariko);
++    if (isMariko)
++        mariko::Patch(mapped_nso, nso_size);
++    else
++        erista::Patch(mapped_nso, nso_size);
++    #endif
++}
++
++}
+\ No newline at end of file
+diff --git a/stratosphere/loader/source/oc/pcv/pcv.hpp b/stratosphere/loader/source/oc/pcv/pcv.hpp
+new file mode 100644
+index 000000000..57fe68b66
+--- /dev/null
++++ b/stratosphere/loader/source/oc/pcv/pcv.hpp
+@@ -0,0 +1,257 @@
++/*
++ * Copyright (C) Switch-OC-Suite
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#pragma once
++
++#include "../oc_common.hpp"
++#include "pcv_common.hpp"
++
++namespace ams::ldr::oc::pcv {
++
++namespace mariko {
++    constexpr cvb_entry_t CpuCvbTableDefault[] = {
++        // CPUB01_CVB_TABLE
++        {  204000, {  721589, -12695, 27 }, {} },
++        {  306000, {  747134, -14195, 27 }, {} },
++        {  408000, {  776324, -15705, 27 }, {} },
++        {  510000, {  809160, -17205, 27 }, {} },
++        {  612000, {  845641, -18715, 27 }, {} },
++        {  714000, {  885768, -20215, 27 }, {} },
++        {  816000, {  929540, -21725, 27 }, {} },
++        {  918000, {  976958, -23225, 27 }, {} },
++        { 1020000, { 1028021, -24725, 27 }, { 1120000 } },
++        { 1122000, { 1082730, -26235, 27 }, { 1120000 } },
++        { 1224000, { 1141084, -27735, 27 }, { 1120000 } },
++        { 1326000, { 1203084, -29245, 27 }, { 1120000 } },
++        { 1428000, { 1268729, -30745, 27 }, { 1120000 } },
++        { 1581000, { 1374032, -33005, 27 }, { 1120000 } },
++        { 1683000, { 1448791, -34505, 27 }, { 1120000 } },
++        { 1785000, { 1527196, -36015, 27 }, { 1120000 } },
++        { 1887000, { 1609246, -37515, 27 }, { 1120000 } },
++        { 1963500, { 1675751, -38635, 27 }, { 1120000 } },
++        { },
++    };
++
++    constexpr u16 CpuMinVolts[] = { 800, 637, 620, 610 };
++
++    constexpr u32 CpuClkOfficial  = 1963'500;
++    constexpr u32 CpuVoltOfficial = 1120;
++
++    constexpr cvb_entry_t GpuCvbTableDefault[] = {
++        // GPUB01_NA_CVB_TABLE
++        {   76800, {}, {  610000,                                 } },
++        {  153600, {}, {  610000,                                 } },
++        {  230400, {}, {  610000,                                 } },
++        {  307200, {}, {  610000,                                 } },
++        {  384000, {}, {  610000,                                 } },
++        {  460800, {}, {  610000,                                 } },
++        {  537600, {}, {  801688, -10900, -163,  298, -10599, 162 } },
++        {  614400, {}, {  824214,  -5743, -452,  238,  -6325,  81 } },
++        {  691200, {}, {  848830,  -3903, -552,  119,  -4030,  -2 } },
++        {  768000, {}, {  891575,  -4409, -584,    0,  -2849,  39 } },
++        {  844800, {}, {  940071,  -5367, -602,  -60,    -63, -93 } },
++        {  921600, {}, {  986765,  -6637, -614, -179,   1905, -13 } },
++        {  998400, {}, { 1098475, -13529, -497, -179,   3626,   9 } },
++        { 1075200, {}, { 1163644, -12688, -648,    0,   1077,  40 } },
++        { 1152000, {}, { 1204812,  -9908, -830,    0,   1469, 110 } },
++        { 1228800, {}, { 1277303, -11675, -859,    0,   3722, 313 } },
++        { 1267200, {}, { 1335531, -12567, -867,    0,   3681, 559 } },
++        { },
++    };
++
++    constexpr u32 GpuClkPllLimit  = 1300'000'000;
++
++    /* GPU Max Clock asm Pattern:
++    *
++    * MOV W11, #0x1000 MOV (wide immediate)                0x1000                              0xB (11)
++    *  sf | opc |                 | hw  |                   imm16                        |      Rd
++    * #31 |30 29|28 27 26 25 24 23|22 21|20 19 18 17 16 15 14 13 12 11 10  9  8  7  6  5 |4  3  2  1  0
++    *   0 | 1 0 | 1  0  0  1  0  1| 0  0| 0  0  0  1  0  0  0  0  0  0  0  0  0  0  0  0 |0  1  0  1  1
++    *
++    * MOVK W11, #0xE, LSL#16     <shift>16                    0xE                              0xB (11)
++    *  sf | opc |                 | hw  |                   imm16                        |      Rd
++    * #31 |30 29|28 27 26 25 24 23|22 21|20 19 18 17 16 15 14 13 12 11 10  9  8  7  6  5 |4  3  2  1  0
++    *   0 | 1 1 | 1  0  0  1  0  1| 0  1| 0  0  0  0  0  0  0  0  0  0  0  0  1  1  1  0 |0  1  0  1  1
++    */
++    inline constexpr u32 asm_pattern[] = { 0x52820000, 0x72A001C0 };
++    inline auto asm_compare_no_rd = [](u32 ins1, u32 ins2) { return ((ins1 ^ ins2) >> 5) == 0; };
++    inline auto asm_get_rd = [](u32 ins) { return ins & ((1 << 5) - 1); };
++    inline auto asm_set_rd = [](u32 ins, u8 rd) { return (ins & 0xFFFFFFE0) | (rd & 0x1F); };
++    inline auto asm_set_imm16 = [](u32 ins, u16 imm) { return (ins & 0xFFE0001F) | ((imm & 0xFFFF) << 5); };
++
++    inline bool GpuMaxClockPatternFn(u32* ptr32) {
++        return asm_compare_no_rd(*ptr32, asm_pattern[0]);
++    }
++
++    constexpr emc_dvb_dvfs_table_t EmcDvbTableDefault[] = {
++        {  204000, {  637,  637,  637, } },
++        {  408000, {  637,  637,  637, } },
++        {  800000, {  637,  637,  637, } },
++        { 1065600, {  637,  637,  637, } },
++        { 1331200, {  650,  637,  637, } },
++        { 1600000, {  675,  650,  637, } },
++    };
++
++    constexpr u32 EmcClkOSAlt     = 1331'200;
++    constexpr u32 EmcClkPllmLimit = 2133'000'000;
++    constexpr u32 EmcVddqDefault  = 600'000;
++    constexpr u32 MemVdd2Default  = 1100'000;
++
++    constexpr u32 MTC_TABLE_REV = 3;
++
++    void Patch(uintptr_t mapped_nso, size_t nso_size);
++
++}
++
++namespace erista {
++    constexpr cvb_entry_t CpuCvbTableDefault[] = {
++        // CPU_PLL_CVB_TABLE_ODN
++        {  204000, {  721094 }, {} },
++        {  306000, {  754040 }, {} },
++        {  408000, {  786986 }, {} },
++        {  510000, {  819932 }, {} },
++        {  612000, {  852878 }, {} },
++        {  714000, {  885824 }, {} },
++        {  816000, {  918770 }, {} },
++        {  918000, {  951716 }, {} },
++        { 1020000, {  984662 }, { -2875621,  358099, -8585 } },
++        { 1122000, { 1017608 }, {   -52225,  104159, -2816 } },
++        { 1224000, { 1050554 }, {  1076868,    8356,  -727 } },
++        { 1326000, { 1083500 }, {  2208191,  -84659,  1240 } },
++        { 1428000, { 1116446 }, {  2519460, -105063,  1611 } },
++        { 1581000, { 1130000 }, {  2889664, -122173,  1834 } },
++        { 1683000, { 1168000 }, {  5100873, -279186,  4747 } },
++        { 1785000, { 1227500 }, {  5100873, -279186,  4747 } },
++        { },
++    };
++
++    constexpr u32 CpuVoltL4T = 1235'000;
++
++    constexpr u16 CpuMinVolts[] = { 950, 850, 825, 810 };
++
++    inline bool CpuMaxVoltPatternFn(u32* ptr32) {
++        u32 val = *ptr32;
++        return (val == 1132 || val == 1170 || val == 1227);
++    }
++
++    constexpr cvb_entry_t GpuCvbTableDefault[] = {
++        // NA_FREQ_CVB_TABLE
++        {   76800, { }, {  814294, 8144, -940, 808, -21583, 226 } },
++        {  153600, { }, {  856185, 8144, -940, 808, -21583, 226 } },
++        {  230400, { }, {  898077, 8144, -940, 808, -21583, 226 } },
++        {  307200, { }, {  939968, 8144, -940, 808, -21583, 226 } },
++        {  384000, { }, {  981860, 8144, -940, 808, -21583, 226 } },
++        {  460800, { }, { 1023751, 8144, -940, 808, -21583, 226 } },
++        {  537600, { }, { 1065642, 8144, -940, 808, -21583, 226 } },
++        {  614400, { }, { 1107534, 8144, -940, 808, -21583, 226 } },
++        {  691200, { }, { 1149425, 8144, -940, 808, -21583, 226 } },
++        {  768000, { }, { 1191317, 8144, -940, 808, -21583, 226 } },
++        {  844800, { }, { 1233208, 8144, -940, 808, -21583, 226 } },
++        {  921600, { }, { 1275100, 8144, -940, 808, -21583, 226 } },
++        { },
++    };
++
++    constexpr u32 MemVoltHOS      = 1125'000;
++    constexpr u32 EmcClkPllmLimit = 1866'000'000;
++
++    constexpr u32 MTC_TABLE_REV = 7;
++
++    void Patch(uintptr_t mapped_nso, size_t nso_size);
++}
++
++template<bool isMariko>
++Result CpuFreqCvbTable(u32* ptr) {
++    cvb_entry_t* default_table = isMariko ? (cvb_entry_t *)(&mariko::CpuCvbTableDefault) : (cvb_entry_t *)(&erista::CpuCvbTableDefault);
++    cvb_entry_t* customize_table = const_cast<cvb_entry_t *>(isMariko ? C.marikoCpuDvfsTable : C.eristaCpuDvfsTable);
++
++    u32 cpu_max_volt = isMariko ? C.marikoCpuMaxVolt : C.eristaCpuMaxVolt;
++    u32 cpu_freq_threshold = isMariko ? 1020'000 : 1785'000;
++
++    size_t default_entry_count = GetDvfsTableEntryCount(default_table);
++    size_t default_table_size = default_entry_count * sizeof(cvb_entry_t);
++    size_t customize_entry_count = GetDvfsTableEntryCount(customize_table);
++    size_t customize_table_size = customize_entry_count * sizeof(cvb_entry_t);
++
++    // Validate existing table
++    cvb_entry_t* table_free = reinterpret_cast<cvb_entry_t *>(ptr) + 1;
++    void* cpu_cvb_table_head = reinterpret_cast<u8 *>(table_free) - default_table_size;
++    bool validated = std::memcmp(cpu_cvb_table_head, default_table, default_table_size) == 0;
++    R_UNLESS(validated, ldr::ResultInvalidCpuDvfs());
++
++    std::memcpy(cpu_cvb_table_head, static_cast<void *>(customize_table), customize_table_size);
++
++    // Patch CPU max volt
++    if (cpu_max_volt) {
++        cvb_entry_t* entry = static_cast<cvb_entry_t *>(cpu_cvb_table_head);
++        for (size_t i = 0; i < customize_entry_count; i++) {
++            if (entry->freq >= cpu_freq_threshold) {
++                PATCH_OFFSET(&(entry->cvb_pll_param.c0), cpu_max_volt * 1000);
++            }
++            entry++;
++        }
++    }
++
++    R_SUCCEED();
++}
++
++template<bool isMariko>
++Result GpuFreqCvbTable(u32* ptr) {
++    cvb_entry_t* default_table = isMariko ? (cvb_entry_t *)(&mariko::GpuCvbTableDefault) : (cvb_entry_t *)(&erista::GpuCvbTableDefault);
++    cvb_entry_t* customize_table = const_cast<cvb_entry_t *>(isMariko ? C.marikoGpuDvfsTable : C.eristaGpuDvfsTable);
++
++    size_t default_entry_count = GetDvfsTableEntryCount(default_table);
++    size_t default_table_size = default_entry_count * sizeof(cvb_entry_t);
++    size_t customize_entry_count = GetDvfsTableEntryCount(customize_table);
++    size_t customize_table_size = customize_entry_count * sizeof(cvb_entry_t);
++
++    // Validate existing table
++    cvb_entry_t* table_free = reinterpret_cast<cvb_entry_t *>(ptr) + 1;
++    void* gpu_cvb_table_head = reinterpret_cast<u8 *>(table_free) - default_table_size;
++    bool validated = std::memcmp(gpu_cvb_table_head, default_table, default_table_size) == 0;
++    R_UNLESS(validated, ldr::ResultInvalidGpuDvfs());
++
++    std::memcpy(gpu_cvb_table_head, (void*)customize_table, customize_table_size);
++
++    R_SUCCEED();
++};
++
++Result MemFreqPllmLimit(u32* ptr);
++Result MemVoltHandler(u32* ptr); // Used for Erista MEM Vdd2 + EMC Vddq or Mariko MEM Vdd2
++
++template<typename T>
++Result MemMtcCustomizeTable(T* dst, T* src) {
++    constexpr u32 mtc_magic = std::is_same_v<T, MarikoMtcTable> ? MARIKO_MTC_MAGIC : ERISTA_MTC_MAGIC;
++    R_UNLESS(src->rev == mtc_magic, ldr::ResultInvalidMtcMagic());
++
++    constexpr u32 ZERO_VAL = UINT32_MAX;
++    // Skip params from dvfs_ver to clock_src;
++    for (size_t offset = offsetof(T, clk_src_emc); offset < sizeof(T); offset += sizeof(u32)) {
++        u32* src_ent = reinterpret_cast<u32 *>(reinterpret_cast<size_t>(src) + offset);
++        u32* dst_ent = reinterpret_cast<u32 *>(reinterpret_cast<size_t>(dst) + offset);
++        u32 src_val = *src_ent;
++
++        if (src_val) {
++            PATCH_OFFSET(dst_ent, src_val == ZERO_VAL ? 0 : src_val);
++        }
++    }
++
++    R_SUCCEED();
++};
++
++void SafetyCheck();
++void Patch(uintptr_t mapped_nso, size_t nso_size);
++
++}
+diff --git a/stratosphere/loader/source/oc/pcv/pcv_common.hpp b/stratosphere/loader/source/oc/pcv/pcv_common.hpp
+new file mode 100644
+index 000000000..83e4ee3af
+--- /dev/null
++++ b/stratosphere/loader/source/oc/pcv/pcv_common.hpp
+@@ -0,0 +1,156 @@
++/*
++ * Copyright (C) Switch-OC-Suite
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#pragma once
++
++namespace ams::ldr::oc::pcv {
++
++typedef struct cvb_coefficients {
++    s32 c0 = 0;
++    s32 c1 = 0;
++    s32 c2 = 0;
++    s32 c3 = 0;
++    s32 c4 = 0;
++    s32 c5 = 0;
++} cvb_coefficients;
++
++typedef struct cvb_entry_t {
++    u64 freq;
++    cvb_coefficients cvb_dfll_param;
++    cvb_coefficients cvb_pll_param;
++} cvb_entry_t;
++static_assert(sizeof(cvb_entry_t) == 0x38);
++
++typedef struct emc_dvb_dvfs_table_t {
++    u64 freq;
++    s32 volt[4] = {0};
++} emc_dvb_dvfs_table_t;
++
++typedef struct __attribute__((packed)) div_nmp {
++    u8 divn_shift;
++    u8 divn_width;
++    u8 divm_shift;
++    u8 divm_width;
++    u8 divp_shift;
++    u8 divp_width;
++    u8 override_divn_shift;
++    u8 override_divm_shift;
++    u8 override_divp_shift;
++} div_nmp;
++
++typedef struct __attribute__((packed)) clk_pll_param {
++    u32 freq;
++    u32 input_min;
++    u32 input_max;
++    u32 cf_min;
++    u32 cf_max;
++    u32 vco_min;
++    u32 vco_max;
++    s32 lock_delay;
++    u32 fixed_rate;
++    u32 unk_0;
++    struct div_nmp *div_nmp;
++    u32 unk_1[4];
++    void (*unk_fn)(u64* unk_struct); // set_defaults?
++} clk_pll_param;
++
++typedef struct __attribute__((packed)) dvfs_rail {
++    u32 id;
++    u32 unk_0[5];
++    u32 freq;
++    u32 unk_1[8];
++    u32 unk_flag;
++    u32 min_mv;
++    u32 step_mv;
++    u32 max_mv;
++    u32 unk_2[11];
++} dvfs_rail;
++
++typedef struct __attribute__((packed)) regulator {
++    u64 id;
++    const char* name;
++    u32 type;
++    union {
++        struct {
++            u32 volt_reg;
++            u32 step_uv;
++            u32 min_uv;
++            u32 default_uv;
++            u32 max_uv;
++            u32 unk_0[2];
++        } type_1;
++        struct {
++            u32 unk_0;
++            u32 step_uv;
++            u32 unk_1;
++            u32 min_uv;
++            u32 max_uv;
++            u32 unk_2;
++            u32 default_uv;
++        } type_2_3;
++    };
++    u32 unk_x[60];
++} regulator;
++static_assert(sizeof(regulator) == 0x120);
++
++constexpr u32 CpuClkOSLimit   = 1785'000;
++
++constexpr u32 EmcClkOSLimit   = 1600'000;
++
++#define R_SKIP() R_SUCCEED()
++
++// Count 32 / Index 31 is reserved to be empty
++constexpr size_t DvfsTableEntryCount = 32;
++constexpr size_t DvfsTableEntryLimit = DvfsTableEntryCount - 1;
++
++template<typename T>
++size_t GetDvfsTableEntryCount(T* table_head) {
++    using NT = std::remove_const_t<std::remove_volatile_t<T>>;
++
++    auto is_empty = [](NT* entry) {
++        uint8_t* m = reinterpret_cast<uint8_t *>(entry);
++        for (size_t i = 0; i < sizeof(NT); i++) {
++            if (*(m + i))
++                return false;
++        }
++        return true;
++    };
++
++    NT* table = const_cast<NT *>(table_head);
++    size_t count = 0;
++    while (count < DvfsTableEntryLimit) {
++        if (is_empty(table++)) {
++            return count;
++        }
++        count++;
++    }
++    return DvfsTableEntryLimit;
++}
++
++template<typename T>
++T* GetDvfsTableLastEntry(T* table_head) {
++    using NT = std::remove_const_t<std::remove_volatile_t<T>>;
++
++    NT* table = const_cast<NT *>(table_head);
++    size_t count = GetDvfsTableEntryCount(table_head);
++    if (!count) {
++        return nullptr;
++    }
++    size_t index = count - 1;
++    return table + index;
++}
++
++}
+\ No newline at end of file
+diff --git a/stratosphere/loader/source/oc/pcv/pcv_erista.cpp b/stratosphere/loader/source/oc/pcv/pcv_erista.cpp
+new file mode 100644
+index 000000000..965be3e92
+--- /dev/null
++++ b/stratosphere/loader/source/oc/pcv/pcv_erista.cpp
+@@ -0,0 +1,108 @@
++/*
++ * Copyright (C) Switch-OC-Suite
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include "pcv.hpp"
++
++namespace ams::ldr::oc::pcv::erista {
++
++Result CpuVoltRange(u32* ptr) {
++    u32 min_volt_got = *(ptr - 1);
++    for (const auto& mv : CpuMinVolts) {
++        if (min_volt_got != mv)
++            continue;
++
++        if (!C.eristaCpuMaxVolt)
++            R_SKIP();
++
++        PATCH_OFFSET(ptr, C.eristaCpuMaxVolt);
++        R_SUCCEED();
++    }
++    R_THROW(ldr::ResultInvalidCpuMinVolt());
++}
++
++Result MemFreqMtcTable(u32* ptr) {
++    u32 khz_list[] = { 1600000, 1331200, 1065600, 800000, 665600, 408000, 204000, 102000, 68000, 40800 };
++    u32 khz_list_size = sizeof(khz_list) / sizeof(u32);
++
++    // Generate list for mtc table pointers
++    EristaMtcTable* table_list[khz_list_size];
++    for (u32 i = 0; i < khz_list_size; i++) {
++        u8* table = reinterpret_cast<u8 *>(ptr) - offsetof(EristaMtcTable, rate_khz) - i * sizeof(EristaMtcTable);
++        table_list[i] = reinterpret_cast<EristaMtcTable *>(table);
++        R_UNLESS(table_list[i]->rate_khz == khz_list[i],    ldr::ResultInvalidMtcTable());
++        R_UNLESS(table_list[i]->rev == MTC_TABLE_REV,       ldr::ResultInvalidMtcTable());
++    }
++
++    if (C.eristaEmcMaxClock <= EmcClkOSLimit)
++        R_SKIP();
++
++    // Make room for new mtc table, discarding useless 40.8 MHz table
++    // 40800 overwritten by 68000, ..., 1331200 overwritten by 1600000, leaving table_list[0] not overwritten
++    for (u32 i = khz_list_size - 1; i > 0; i--)
++        std::memcpy(static_cast<void *>(table_list[i]), static_cast<void *>(table_list[i - 1]), sizeof(EristaMtcTable));
++
++    PATCH_OFFSET(ptr, C.eristaEmcMaxClock);
++
++    // Handle customize table replacement
++    if (C.mtcConf == CUSTOMIZED_ALL) {
++        MemMtcCustomizeTable(table_list[0], const_cast<EristaMtcTable *>(C.eristaMtcTable));
++    }
++
++    R_SUCCEED();
++}
++
++Result MemFreqMax(u32* ptr) {
++    if (C.eristaEmcMaxClock <= EmcClkOSLimit)
++        R_SKIP();
++
++    PATCH_OFFSET(ptr, C.eristaEmcMaxClock);
++
++    R_SUCCEED();
++}
++
++void Patch(uintptr_t mapped_nso, size_t nso_size) {
++    u32 CpuCvbDefaultMaxFreq = static_cast<u32>(GetDvfsTableLastEntry(CpuCvbTableDefault)->freq);
++    u32 GpuCvbDefaultMaxFreq = static_cast<u32>(GetDvfsTableLastEntry(GpuCvbTableDefault)->freq);
++
++    PatcherEntry<u32> patches[] = {
++        { "CPU Freq Table", CpuFreqCvbTable<false>, 1, nullptr, CpuCvbDefaultMaxFreq },
++        { "CPU Volt Limit", &CpuVoltRange,          0, &CpuMaxVoltPatternFn },
++        { "GPU Freq Table", GpuFreqCvbTable<false>, 1, nullptr, GpuCvbDefaultMaxFreq },
++        { "MEM Freq Mtc",   &MemFreqMtcTable,       0, nullptr, EmcClkOSLimit },
++        { "MEM Freq Max",   &MemFreqMax,            0, nullptr, EmcClkOSLimit },
++        { "MEM Freq PLLM",  &MemFreqPllmLimit,      2, nullptr, EmcClkPllmLimit },
++        { "MEM Volt",       &MemVoltHandler,        2, nullptr, MemVoltHOS },
++    };
++
++    for (uintptr_t ptr = mapped_nso;
++         ptr <= mapped_nso + nso_size - sizeof(EristaMtcTable);
++         ptr += sizeof(u32))
++    {
++        u32* ptr32 = reinterpret_cast<u32 *>(ptr);
++        for (auto& entry : patches) {
++            if (R_SUCCEEDED(entry.SearchAndApply(ptr32)))
++                break;
++        }
++    }
++
++    for (auto& entry : patches) {
++        LOGGING("%s Count: %zu", entry.description, entry.patched_count);
++        if (R_FAILED(entry.CheckResult()))
++            CRASH(entry.description);
++    }
++}
++
++}
+\ No newline at end of file
+diff --git a/stratosphere/loader/source/oc/pcv/pcv_mariko.cpp b/stratosphere/loader/source/oc/pcv/pcv_mariko.cpp
+new file mode 100644
+index 000000000..13664dd33
+--- /dev/null
++++ b/stratosphere/loader/source/oc/pcv/pcv_mariko.cpp
+@@ -0,0 +1,395 @@
++/*
++ * Copyright (C) Switch-OC-Suite
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include "pcv.hpp"
++
++namespace ams::ldr::oc::pcv::mariko {
++
++Result CpuFreqVdd(u32* ptr) {
++    dvfs_rail* entry = reinterpret_cast<dvfs_rail *>(reinterpret_cast<u8 *>(ptr) - offsetof(dvfs_rail, freq));
++
++    R_UNLESS(entry->id == 1,            ldr::ResultInvalidCpuFreqVddEntry());
++    R_UNLESS(entry->min_mv == 250'000,  ldr::ResultInvalidCpuFreqVddEntry());
++    R_UNLESS(entry->step_mv == 5000,    ldr::ResultInvalidCpuFreqVddEntry());
++    R_UNLESS(entry->max_mv == 1525'000, ldr::ResultInvalidCpuFreqVddEntry());
++
++    PATCH_OFFSET(ptr, GetDvfsTableLastEntry(C.marikoCpuDvfsTable)->freq);
++
++    R_SUCCEED();
++}
++
++Result CpuVoltRange(u32* ptr) {
++    u32 min_volt_got = *(ptr - 1);
++    for (const auto& mv : CpuMinVolts) {
++        if (min_volt_got != mv)
++            continue;
++
++        if (!C.marikoCpuMaxVolt)
++            R_SKIP();
++
++        PATCH_OFFSET(ptr, C.marikoCpuMaxVolt);
++        R_SUCCEED();
++    }
++    R_THROW(ldr::ResultInvalidCpuMinVolt());
++}
++
++Result GpuFreqMaxAsm(u32* ptr32) {
++    // Check if both two instructions match the pattern
++    u32 ins1 = *ptr32, ins2 = *(ptr32 + 1);
++    if (!(asm_compare_no_rd(ins1, asm_pattern[0]) && asm_compare_no_rd(ins2, asm_pattern[1])))
++        R_THROW(ldr::ResultInvalidGpuFreqMaxPattern());
++
++    // Both instructions should operate on the same register
++    u8 rd = asm_get_rd(ins1);
++    if (rd != asm_get_rd(ins2))
++        R_THROW(ldr::ResultInvalidGpuFreqMaxPattern());
++
++    u32 max_clock = GetDvfsTableLastEntry(C.marikoGpuDvfsTable)->freq;
++    u32 asm_patch[2] = {
++        asm_set_rd(asm_set_imm16(asm_pattern[0], max_clock), rd),
++        asm_set_rd(asm_set_imm16(asm_pattern[1], max_clock >> 16), rd)
++    };
++    PATCH_OFFSET(ptr32, asm_patch[0]);
++    PATCH_OFFSET(ptr32 + 1, asm_patch[1]);
++
++    R_SUCCEED();
++}
++
++Result GpuFreqPllLimit(u32* ptr) {
++    clk_pll_param* entry = reinterpret_cast<clk_pll_param *>(ptr);
++
++    // All zero except for freq
++    for (size_t i = 1; i < sizeof(clk_pll_param) / sizeof(u32); i++) {
++        R_UNLESS(*(ptr + i) == 0, ldr::ResultInvalidGpuPllEntry());
++    }
++
++    // Double the max clk simply
++    u32 max_clk = entry->freq * 2;
++    entry->freq = max_clk;
++    R_SUCCEED();
++}
++
++void MemMtcTableAutoAdjust(MarikoMtcTable* table, const MarikoMtcTable* ref) {
++    /* Official Tegra X1 TRM, sign up for nvidia developer program (free) to download:
++     *     https://developer.nvidia.com/embedded/dlc/tegra-x1-technical-reference-manual
++     *     Section 18.11: MC Registers
++     *
++     * Retail Mariko: 200FBGA 16Gb DDP LPDDR4X SDRAM x 2
++     * x16/Ch, 1Ch/die, Double-die, 2Ch, 1CS(rank), 8Gb density per die
++     * 64Mb x 16DQ x 8banks x 2channels = 2048MB (x32DQ) per package
++     *
++     * Devkit Mariko: 200FBGA 32Gb DDP LPDDR4X SDRAM x 2
++     * x16/Ch, 1Ch/die, Quad-die,   2Ch, 2CS(rank), 8Gb density per die
++     * X1+ EMC can R/W to both ranks at the same time, resulting in doubled DQ
++     * 64Mb x 32DQ x 8banks x 2channels = 4096MB (x64DQ) per package
++     *
++     * If you have access to LPDDR4(X) specs or datasheets (from manufacturers or Google),
++     * you'd better calculate timings yourself rather than relying on following algorithm.
++     */
++
++    if (C.mtcConf != AUTO_ADJ_SAFE_MARIKO_ONLY && C.mtcConf != AUTO_ADJ_SAFE_MARIKO_ONLY)
++    	return;
++
++    #define ADJUST_PROP(TARGET, REF)                                                                        \
++        (u32)(std::ceil(REF + ((C.marikoEmcMaxClock-EmcClkOSAlt)*(TARGET-REF))/(EmcClkOSLimit-EmcClkOSAlt)))
++
++    #define ADJUST_PARAM(TARGET, REF)     \
++        TARGET = ADJUST_PROP(TARGET, REF);
++
++    #define ADJUST_PARAM_TABLE(TABLE, PARAM, REF)    ADJUST_PARAM(TABLE->PARAM, REF->PARAM)
++
++    #define ADJUST_PARAM_ALL_REG(TABLE, PARAM, REF)                 \
++        ADJUST_PARAM_TABLE(TABLE, burst_regs.PARAM, REF)            \
++        ADJUST_PARAM_TABLE(TABLE, shadow_regs_ca_train.PARAM, REF)  \
++        ADJUST_PARAM_TABLE(TABLE, shadow_regs_rdwr_train.PARAM, REF)
++
++    #define WRITE_PARAM_ALL_REG(TABLE, PARAM, VALUE)\
++        TABLE->burst_regs.PARAM = VALUE;            \
++        TABLE->shadow_regs_ca_train.PARAM = VALUE;  \
++        TABLE->shadow_regs_rdwr_train.PARAM = VALUE;
++
++    ADJUST_PARAM_ALL_REG(table, emc_r2w, ref);
++    ADJUST_PARAM_ALL_REG(table, emc_w2r, ref);
++    ADJUST_PARAM_ALL_REG(table, emc_r2p, ref);
++    ADJUST_PARAM_ALL_REG(table, emc_w2p, ref);
++    ADJUST_PARAM_ALL_REG(table, emc_trtm, ref);
++    ADJUST_PARAM_ALL_REG(table, emc_twtm, ref);
++    ADJUST_PARAM_ALL_REG(table, emc_tratm, ref);
++    ADJUST_PARAM_ALL_REG(table, emc_twatm, ref);
++
++    ADJUST_PARAM_ALL_REG(table, emc_rw2pden, ref);
++
++    ADJUST_PARAM_ALL_REG(table, emc_tclkstop, ref);
++
++    ADJUST_PARAM_ALL_REG(table, emc_pmacro_dll_cfg_2, ref); // EMC_DLL_CFG_2_0: level select for VDDA?
++
++    ADJUST_PARAM_TABLE(table, la_scale_regs.mc_mll_mpcorer_ptsa_rate, ref);
++    ADJUST_PARAM_TABLE(table, la_scale_regs.mc_ptsa_grant_decrement, ref);
++
++    /* Timings that are available in or can be derived from LPDDR4X datasheet or TRM */
++    const bool use_4266_spec = C.mtcConf == AUTO_ADJ_4266_MARIKO_ONLY;
++    // tCK_avg (average clock period) in ns
++    const double tCK_avg = 1200'000. / C.marikoEmcMaxClock;
++    // tRPpb (row precharge time per bank) in ns
++    const u32 tRPpb = 18;
++    // tRPab (row precharge time all banks) in ns
++    const u32 tRPab = 21;
++    // tRAS (row active time) in ns
++    const u32 tRAS = 42;
++    // tRC (ACTIVATE-ACTIVATE command period same bank) in ns
++    const u32 tRC = tRPpb + tRAS;
++    // tRFCab (refresh cycle time all banks) in ns for 8Gb density
++    const u32 tRFCab = 280;
++    // tRFCpb (refresh cycle time per bank) in ns for 8Gb density
++    const u32 tRFCpb = 140;
++    // tRCD (RAS-CAS delay) in ns
++    const u32 tRCD = 18;
++    // tRRD (Active bank-A to Active bank-B) in ns
++    const double tRRD = use_4266_spec ? 7.5 : 10.;
++    // tREFpb (average refresh interval per bank) in ns for 8Gb density
++    const u32 tREFpb = 488;
++    // tREFab (average refresh interval all 8 banks) in ns for 8Gb density
++    // const u32 tREFab = tREFpb * 8;
++    // #_of_rows per die for 8Gb density
++    const u32 numOfRows = 65536;
++    // {REFRESH, REFRESH_LO} = max[(tREF/#_of_rows) / (emc_clk_period) - 64, (tREF/#_of_rows) / (emc_clk_period) * 97%]
++    // emc_clk_period = dram_clk / 2;
++    // 1600 MHz: 5894, but N' set to 6176 (~4.8% margin)
++    const u32 REFRESH = u32(std::ceil((double(tREFpb) * C.marikoEmcMaxClock / numOfRows * 1.048 / 2 - 64))) / 4 * 4;
++    // tPDEX2WR, tPDEX2RD (timing delay from exiting powerdown mode to a write/read command) in ns
++    const u32 tPDEX2 = 10;
++    // [Guessed] tACT2PDEN (timing delay from an activate, MRS or EMRS command to power-down entry) in ns
++    const u32 tACT2PDEN = 14;
++    // [Guessed] tPDEX2MRR (timing delay from exiting powerdown mode to MRR command) in ns
++    const double tPDEX2MRR = 28.75;
++    // [Guessed] tCKE2PDEN (timing delay from turning off CKE to power-down entry) in ns
++    const double tCKE2PDEN = 8.5;
++    // tXSR (SELF REFRESH exit to next valid command delay) in ns
++    const double tXSR = tRFCab + 7.5;
++    // tCKE (minimum CKE high pulse width) in ns
++    const u32 tCKE = 8;
++    // tCKELPD (minimum CKE low pulse width in SELF REFRESH) in ns
++    const u32 tCKELPD = 15;
++    // [Guessed] tPD (minimum CKE low pulse width in power-down mode) in ns
++    const double tPD = 7.5;
++    // tFAW (Four-bank Activate Window) in ns
++    const u32 tFAW = use_4266_spec ? 30 : 40;
++
++    #define GET_CYCLE_CEIL(PARAM) u32(std::ceil(double(PARAM) / tCK_avg))
++
++    WRITE_PARAM_ALL_REG(table, emc_rc,      GET_CYCLE_CEIL(tRC));
++    WRITE_PARAM_ALL_REG(table, emc_rfc,     GET_CYCLE_CEIL(tRFCab));
++    WRITE_PARAM_ALL_REG(table, emc_rfcpb,   GET_CYCLE_CEIL(tRFCpb));
++    WRITE_PARAM_ALL_REG(table, emc_ras,     GET_CYCLE_CEIL(tRAS));
++    WRITE_PARAM_ALL_REG(table, emc_rp,      GET_CYCLE_CEIL(tRPpb));
++    WRITE_PARAM_ALL_REG(table, emc_rd_rcd,  GET_CYCLE_CEIL(tRCD));
++    WRITE_PARAM_ALL_REG(table, emc_wr_rcd,  GET_CYCLE_CEIL(tRCD));
++    WRITE_PARAM_ALL_REG(table, emc_rrd,     GET_CYCLE_CEIL(tRRD));
++    WRITE_PARAM_ALL_REG(table, emc_refresh, REFRESH);
++    WRITE_PARAM_ALL_REG(table, emc_pre_refresh_req_cnt, REFRESH / 4);
++    WRITE_PARAM_ALL_REG(table, emc_pdex2wr, GET_CYCLE_CEIL(tPDEX2));
++    WRITE_PARAM_ALL_REG(table, emc_pdex2rd, GET_CYCLE_CEIL(tPDEX2));
++    WRITE_PARAM_ALL_REG(table, emc_act2pden,GET_CYCLE_CEIL(tACT2PDEN));
++    WRITE_PARAM_ALL_REG(table, emc_cke2pden,GET_CYCLE_CEIL(tCKE2PDEN));
++    WRITE_PARAM_ALL_REG(table, emc_pdex2mrr,GET_CYCLE_CEIL(tPDEX2MRR));
++    WRITE_PARAM_ALL_REG(table, emc_txsr,    GET_CYCLE_CEIL(tXSR));
++    WRITE_PARAM_ALL_REG(table, emc_txsrdll, GET_CYCLE_CEIL(tXSR));
++    WRITE_PARAM_ALL_REG(table, emc_tcke,    GET_CYCLE_CEIL(tCKE));
++    WRITE_PARAM_ALL_REG(table, emc_tckesr,  GET_CYCLE_CEIL(tCKELPD));
++    WRITE_PARAM_ALL_REG(table, emc_tpd,     GET_CYCLE_CEIL(tPD));
++    WRITE_PARAM_ALL_REG(table, emc_tfaw,    GET_CYCLE_CEIL(tFAW));
++    WRITE_PARAM_ALL_REG(table, emc_trpab,   GET_CYCLE_CEIL(tRPab));
++    WRITE_PARAM_ALL_REG(table, emc_trefbw,  REFRESH + 64);
++
++    constexpr u32 MC_ARB_DIV = 4; // ?
++    table->burst_mc_regs.mc_emem_arb_timing_rcd     = std::ceil(GET_CYCLE_CEIL(tRCD) / MC_ARB_DIV - 2);
++    table->burst_mc_regs.mc_emem_arb_timing_rp      = std::ceil(GET_CYCLE_CEIL(tRPpb) / MC_ARB_DIV - 1);
++    table->burst_mc_regs.mc_emem_arb_timing_rc      = std::ceil(std::max(GET_CYCLE_CEIL(tRC), GET_CYCLE_CEIL(tRAS)+GET_CYCLE_CEIL(tRPpb)) / MC_ARB_DIV);
++    table->burst_mc_regs.mc_emem_arb_timing_ras     = std::ceil(GET_CYCLE_CEIL(tRAS) / MC_ARB_DIV - 2);
++    table->burst_mc_regs.mc_emem_arb_timing_faw     = std::ceil(GET_CYCLE_CEIL(tFAW) / MC_ARB_DIV - 1);
++    table->burst_mc_regs.mc_emem_arb_timing_rrd     = std::ceil(GET_CYCLE_CEIL(tRRD) / MC_ARB_DIV - 1);
++    table->burst_mc_regs.mc_emem_arb_timing_rap2pre = std::ceil(table->burst_regs.emc_r2p / MC_ARB_DIV);
++    table->burst_mc_regs.mc_emem_arb_timing_wap2pre = std::ceil(table->burst_regs.emc_w2p / MC_ARB_DIV);
++    table->burst_mc_regs.mc_emem_arb_timing_r2w     = std::ceil(table->burst_regs.emc_r2w / MC_ARB_DIV + 1);
++    table->burst_mc_regs.mc_emem_arb_timing_w2r     = std::ceil(table->burst_regs.emc_w2r / MC_ARB_DIV + 1);
++    table->burst_mc_regs.mc_emem_arb_timing_rfcpb   = std::ceil(GET_CYCLE_CEIL(tRFCpb) / MC_ARB_DIV + 1); // ?
++}
++
++void MemMtcPllmbDivisor(MarikoMtcTable* table) {
++    // Calculate DIVM and DIVN (clock divisors)
++    // Common PLL oscillator is 38.4 MHz
++    // PLLMB_OUT = 38.4 MHz / PLLLMB_DIVM * PLLMB_DIVN
++    typedef struct {
++        u8 numerator   : 4;
++        u8 denominator : 4;
++    } pllmb_div;
++
++    constexpr pllmb_div div[] = {
++        {3, 4}, {2, 3}, {1, 2}, {1, 3}, {1, 4}, {0, 2}
++    };
++
++    constexpr u32 pll_osc_in = 38'400;
++    u32 divm {}, divn {};
++    const u32 remainder = C.marikoEmcMaxClock % pll_osc_in;
++    for (const auto &index : div) {
++        // Round down
++        if (remainder >= pll_osc_in * index.numerator / index.denominator) {
++            divm = index.denominator;
++            divn = C.marikoEmcMaxClock / pll_osc_in * divm + index.numerator;
++            break;
++        }
++    }
++
++    table->pllmb_divm = divm;
++    table->pllmb_divn = divn;
++}
++
++Result MemFreqMtcTable(u32* ptr) {
++    u32 khz_list[] = { 1600000, 1331200, 204000 };
++    u32 khz_list_size = sizeof(khz_list) / sizeof(u32);
++
++    // Generate list for mtc table pointers
++    MarikoMtcTable* table_list[khz_list_size];
++    for (u32 i = 0; i < khz_list_size; i++) {
++        u8* table = reinterpret_cast<u8 *>(ptr) - offsetof(MarikoMtcTable, rate_khz) - i * sizeof(MarikoMtcTable);
++        table_list[i] = reinterpret_cast<MarikoMtcTable *>(table);
++        R_UNLESS(table_list[i]->rate_khz == khz_list[i],    ldr::ResultInvalidMtcTable());
++        R_UNLESS(table_list[i]->rev == MTC_TABLE_REV,       ldr::ResultInvalidMtcTable());
++    }
++
++    if (C.marikoEmcMaxClock <= EmcClkOSLimit)
++        R_SKIP();
++
++    MarikoMtcTable *table_alt = table_list[1], *table_max = table_list[0];
++    MarikoMtcTable *tmp = new MarikoMtcTable;
++
++    // Copy unmodified 1600000 table to tmp
++    std::memcpy(reinterpret_cast<void *>(tmp), reinterpret_cast<void *>(table_max), sizeof(MarikoMtcTable));
++    // Adjust max freq mtc timing parameters with reference to 1331200 table
++    MemMtcTableAutoAdjust(table_max, table_alt);
++    MemMtcPllmbDivisor(table_max);
++    // Overwrite 13312000 table with unmodified 1600000 table copied back
++    std::memcpy(reinterpret_cast<void *>(table_alt), reinterpret_cast<void *>(tmp), sizeof(MarikoMtcTable));
++
++    delete tmp;
++
++    PATCH_OFFSET(ptr, C.marikoEmcMaxClock);
++
++    // Handle customize table replacement
++    if (C.mtcConf == CUSTOMIZED_ALL) {
++        MemMtcCustomizeTable(table_list[0], reinterpret_cast<MarikoMtcTable *>(reinterpret_cast<u8 *>(C.marikoMtcTable)));
++    }
++
++    R_SUCCEED();
++}
++
++Result MemFreqDvbTable(u32* ptr) {
++    emc_dvb_dvfs_table_t* default_end  = reinterpret_cast<emc_dvb_dvfs_table_t *>(ptr);
++    emc_dvb_dvfs_table_t* new_start = default_end + 1;
++
++    // Validate existing table
++    void* mem_dvb_table_head = reinterpret_cast<u8 *>(new_start) - sizeof(EmcDvbTableDefault);
++    bool validated = std::memcmp(mem_dvb_table_head, EmcDvbTableDefault, sizeof(EmcDvbTableDefault)) == 0;
++    R_UNLESS(validated, ldr::ResultInvalidDvbTable());
++
++    if (C.marikoEmcMaxClock <= EmcClkOSLimit)
++        R_SKIP();
++
++    if (C.marikoEmcMaxClock <= 1862400) {
++        std::memcpy(new_start, default_end, sizeof(emc_dvb_dvfs_table_t));
++    } else {
++        emc_dvb_dvfs_table_t oc_table = { 2131200, { 775, 750, 725, } };
++        std::memcpy(new_start, &oc_table, sizeof(emc_dvb_dvfs_table_t));
++    }
++    new_start->freq = C.marikoEmcMaxClock;
++
++    R_SUCCEED();
++}
++
++Result MemFreqMax(u32* ptr) {
++    if (C.marikoEmcMaxClock <= EmcClkOSLimit)
++        R_SKIP();
++
++    PATCH_OFFSET(ptr, C.marikoEmcMaxClock);
++    R_SUCCEED();
++}
++
++Result EmcVddqVolt(u32* ptr) {
++    regulator* entry = reinterpret_cast<regulator *>(reinterpret_cast<u8 *>(ptr) - offsetof(regulator, type_2_3.default_uv));
++
++    constexpr u32 uv_step = 5'000;
++    constexpr u32 uv_min  = 250'000;
++
++    auto validator = [entry]() {
++        R_UNLESS(entry->id == 2,                        ldr::ResultInvalidRegulatorEntry());
++        R_UNLESS(entry->type == 3,                      ldr::ResultInvalidRegulatorEntry());
++        R_UNLESS(entry->type_2_3.step_uv == uv_step,    ldr::ResultInvalidRegulatorEntry());
++        R_UNLESS(entry->type_2_3.min_uv == uv_min,      ldr::ResultInvalidRegulatorEntry());
++        R_SUCCEED();
++    };
++
++    R_TRY(validator());
++
++    u32 emc_uv = C.marikoEmcVddqVolt;
++    if (!emc_uv)
++        R_SKIP();
++
++    if (emc_uv % uv_step)
++        emc_uv = emc_uv / uv_step * uv_step; // rounding
++
++    PATCH_OFFSET(ptr, emc_uv);
++
++    R_SUCCEED();
++}
++
++void Patch(uintptr_t mapped_nso, size_t nso_size) {
++    u32 CpuCvbDefaultMaxFreq = static_cast<u32>(GetDvfsTableLastEntry(CpuCvbTableDefault)->freq);
++    u32 GpuCvbDefaultMaxFreq = static_cast<u32>(GetDvfsTableLastEntry(GpuCvbTableDefault)->freq);
++
++    PatcherEntry<u32> patches[] = {
++        { "CPU Freq Vdd",   &CpuFreqVdd,            1, nullptr, CpuClkOSLimit },
++        { "CPU Freq Table", CpuFreqCvbTable<true>,  1, nullptr, CpuCvbDefaultMaxFreq },
++        { "CPU Volt Limit", &CpuVoltRange,         13, nullptr, CpuVoltOfficial },
++        { "GPU Freq Table", GpuFreqCvbTable<true>,  1, nullptr, GpuCvbDefaultMaxFreq },
++        { "GPU Freq Asm",   &GpuFreqMaxAsm,         2, &GpuMaxClockPatternFn },
++        { "GPU Freq PLL",   &GpuFreqPllLimit,       1, nullptr, GpuClkPllLimit },
++        { "MEM Freq Mtc",   &MemFreqMtcTable,       0, nullptr, EmcClkOSLimit },
++        { "MEM Freq Dvb",   &MemFreqDvbTable,       1, nullptr, EmcClkOSLimit },
++        { "MEM Freq Max",   &MemFreqMax,            0, nullptr, EmcClkOSLimit },
++        { "MEM Freq PLLM",  &MemFreqPllmLimit,      2, nullptr, EmcClkPllmLimit },
++        { "MEM Vddq",       &EmcVddqVolt,           2, nullptr, EmcVddqDefault },
++        { "MEM Vdd2",       &MemVoltHandler,        2, nullptr, MemVdd2Default }
++    };
++
++    for (uintptr_t ptr = mapped_nso;
++         ptr <= mapped_nso + nso_size - sizeof(MarikoMtcTable);
++         ptr += sizeof(u32))
++    {
++        u32* ptr32 = reinterpret_cast<u32 *>(ptr);
++        for (auto& entry : patches) {
++            if (R_SUCCEEDED(entry.SearchAndApply(ptr32)))
++                break;
++        }
++    }
++
++    for (auto& entry : patches) {
++        LOGGING("%s Count: %zu", entry.description, entry.patched_count);
++        if (R_FAILED(entry.CheckResult()))
++            CRASH(entry.description);
++    }
++}
++
++}
+\ No newline at end of file
+diff --git a/stratosphere/loader/source/oc/ptm/ptm.cpp b/stratosphere/loader/source/oc/ptm/ptm.cpp
+new file mode 100644
+index 000000000..543415e58
+--- /dev/null
++++ b/stratosphere/loader/source/oc/ptm/ptm.cpp
+@@ -0,0 +1,126 @@
++/*
++ * Copyright (C) Switch-OC-Suite
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include "ptm.hpp"
++
++namespace ams::ldr::oc::ptm {
++
++Result CpuPtmBoost(perf_conf_entry* entry) {
++    if (!C.commonCpuBoostClock)
++        R_SUCCEED();
++
++    u32 cpuPtmBoostNew = C.commonCpuBoostClock * 1000;
++
++    PATCH_OFFSET(&(entry->cpu_freq_1), cpuPtmBoostNew);
++    PATCH_OFFSET(&(entry->cpu_freq_2), cpuPtmBoostNew);
++
++    R_SUCCEED();
++}
++
++Result MemPtm(perf_conf_entry* entry) {
++    PATCH_OFFSET(&(entry->emc_freq_1), memPtmLimit);
++    PATCH_OFFSET(&(entry->emc_freq_2), memPtmLimit);
++
++    R_SUCCEED();
++}
++
++bool PtmEntryIsValid(perf_conf_entry* entry) {
++    return (entry->cpu_freq_1 == entry->cpu_freq_2 &&
++            entry->gpu_freq_1 == entry->gpu_freq_2 &&
++            entry->emc_freq_1 == entry->emc_freq_2);
++}
++
++bool PtmTablePatternFn(u32* ptr) {
++    perf_conf_entry* entry = reinterpret_cast<perf_conf_entry *>(ptr);
++    if (!PtmEntryIsValid(entry))
++        return false;
++
++    return entry->cpu_freq_1 == cpuPtmDefault;
++}
++
++void Patch(uintptr_t mapped_nso, size_t nso_size) {
++    perf_conf_entry* confTable = nullptr;
++    for (uintptr_t ptr = mapped_nso;
++         ptr <= mapped_nso + nso_size - sizeof(perf_conf_entry) * entryCnt;
++         ptr += sizeof(u32))
++    {
++        u32* ptr32 = reinterpret_cast<u32 *>(ptr);
++        if (PtmTablePatternFn(ptr32)) {
++            confTable = reinterpret_cast<perf_conf_entry *>(ptr);
++            break;
++        }
++    }
++
++    if (!confTable) {
++        CRASH("confTable not found!");
++    }
++
++    PatcherEntry<perf_conf_entry> cpuPtmBoostPatch = { "CPU Ptm Boost", &CpuPtmBoost, 2, };
++    PatcherEntry<perf_conf_entry> memPtmPatch = { "MEM Ptm", &MemPtm, 16, };
++
++    #ifdef ATMOSPHERE_IS_STRATOSPHERE
++    bool isMariko = (spl::GetSocType() == spl::SocType_Mariko);
++    #else
++    bool isMariko = true;
++    #endif
++
++
++    for (u32 i = 0; i < entryCnt; i++) {
++        perf_conf_entry* entry = confTable + i;
++
++        if (!PtmEntryIsValid(entry)) {
++            LOGGING("@%p", &entry);
++            CRASH("Invalid ptm confTable entry");
++        }
++
++        switch (entry->cpu_freq_1) {
++            case cpuPtmBoost:
++                cpuPtmBoostPatch.Apply(entry);
++                break;
++            case cpuPtmDefault:
++            case cpuPtmDevOC:
++                break;
++            default:
++                LOGGING("%u (0x%08x) @%p", entry->cpu_freq_1, entry->conf_id, &(entry->cpu_freq_1));
++                CRASH("Unknown CPU Freq");
++        }
++
++        switch (entry->emc_freq_1) {
++            case memPtmLimit:
++            case memPtmAlt:
++            case memPtmClamp:
++                if (isMariko) {
++                    memPtmPatch.Apply(entry);
++                }
++                break;
++            default:
++                LOGGING("%u (0x%08x) @%p", entry->emc_freq_1, entry->conf_id, &(entry->emc_freq_2));
++                CRASH("Unknown MEM Freq");
++        }
++    }
++
++    LOGGING("%s Count: %zu", cpuPtmBoostPatch.description, cpuPtmBoostPatch.patched_count);
++    if (R_FAILED(cpuPtmBoostPatch.CheckResult()))
++        CRASH(cpuPtmBoostPatch.description);
++
++    if (isMariko) {
++        LOGGING("%s Count: %zu", memPtmPatch.description, memPtmPatch.patched_count);
++        if (R_FAILED(memPtmPatch.CheckResult()))
++            CRASH(memPtmPatch.description);
++    }
++}
++
++}
+diff --git a/stratosphere/loader/source/oc/ptm/ptm.hpp b/stratosphere/loader/source/oc/ptm/ptm.hpp
+new file mode 100644
+index 000000000..72360e449
+--- /dev/null
++++ b/stratosphere/loader/source/oc/ptm/ptm.hpp
+@@ -0,0 +1,45 @@
++/*
++ * Copyright (C) Switch-OC-Suite
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#pragma once
++
++#include "../oc_common.hpp"
++
++namespace ams::ldr::oc::ptm {
++
++typedef struct {
++    u32 conf_id;
++    u32 cpu_freq_1; // min-max pair?
++    u32 cpu_freq_2;
++    u32 gpu_freq_1;
++    u32 gpu_freq_2;
++    u32 emc_freq_1;
++    u32 emc_freq_2;
++    u32 padding;
++} perf_conf_entry;
++
++constexpr u32 entryCnt       = 16;
++constexpr u32 cpuPtmDefault  = 1020'000'000;
++constexpr u32 cpuPtmDevOC    = 1224'000'000;
++constexpr u32 cpuPtmBoost    = 1785'000'000;
++
++constexpr u32 memPtmLimit    = 1600'000'000;
++constexpr u32 memPtmAlt      = 1331'200'000;
++constexpr u32 memPtmClamp    = 1065'600'000;
++
++void Patch(uintptr_t mapped_nso, size_t nso_size);
++
++}
+\ No newline at end of file
+-- 
+2.53.0.windows.1
+

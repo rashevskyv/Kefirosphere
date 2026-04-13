@@ -1,0 +1,74 @@
+From 46007b0608d9da5a2eaa45ae6b31fddf1e34dddc Mon Sep 17 00:00:00 2001
+From: rashevskyv <rashevsky.v@gmail.com>
+Date: Mon, 13 Apr 2026 01:18:24 +0300
+Subject: [PATCH 07/14] KEFIR: Changed readme and build instructions
+
+---
+ README.md        | 12 ++++++++++++
+ docs/building.md | 29 +++++++++++++++--------------
+ 2 files changed, 27 insertions(+), 14 deletions(-)
+
+diff --git a/README.md b/README.md
+index aee0ff97d..73dc2f564 100644
+--- a/README.md
++++ b/README.md
+@@ -11,6 +11,18 @@ Atmosphère is a work-in-progress customized firmware for the Nintendo Switch.
+ Components
+ =====
+ 
++Kefirosphere features:
++
++* Updating the firmware version to match the system version
++* Installing a specific memory card driver by default when updating the system
++* Removing the ACID signature check for using homebrew without patches
++* Embedded Sigpatches
++* Removing system logging to prevent cluttering the memory card and excessive use
++* Redirecting saves from internal memory to the memory card when using the emuNAND command to reduce the likelihood of losing them when exiting the emuNAND command (optional)
++
++Components
++=====
++
+ Atmosphère consists of multiple components, each of which replaces/modifies a different component of the system:
+ 
+ * Fusée: First-stage Loader, responsible for loading and validating stage 2 (custom TrustZone) plus package2 (Kernel/FIRM sysmodules), and patching them as needed. This replaces all functionality normally in Package1loader/NX Bootloader.
+diff --git a/docs/building.md b/docs/building.md
+index 4f000acf0..ae998b656 100644
+--- a/docs/building.md
++++ b/docs/building.md
+@@ -10,17 +10,18 @@ Building Atmosphère is a very straightforward process that relies almost exclus
+ + [hactool](https://github.com/SciresM/hactool)
+ 
+ ## Instructions
+-1. Follow the guide located [here](https://devkitpro.org/wiki/Getting_Started) to install and configure all the tools necessary for the build process.
+-
+-2. Install the following packages via (dkp-)pacman:
+-    + `switch-dev`
+-    + `switch-glm`
+-    + `switch-libjpeg-turbo`
+-    + `devkitARM`
+-    + `devkitarm-rules`
+-    + `hactool`
+-
+-3. Install the following library via python's package manager `pip`, required by [exosphere](components/exosphere.md):
+-    + `lz4`
+-
+-4. Finally, clone the Atmosphère repository and run `make` under its root directory.
++1. Install pacman
++    * `wget https://github.com/devkitPro/pacman/releases/download/v1.0.2/devkitpro-pacman.amd64.deb`
++    * `sudo apt-get install gdebi-core`
++    * `sudo gdebi devkitpro-pacman.amd64.deb`
++1. Install devkitpro
++    * `sudo dkp-pacman -Syu`
++    * `sudo dkp-pacman -S switch-dev switch-glm switch-libjpeg-turbo devkitARM devkitarm-rules hactool`
++    * `echo export DEVKITPRO="/opt/devkitpro" >> .bashrc`
++1. Install Python 2
++    * `sudo apt install python2 zip`
++    * `curl https://bootstrap.pypa.io/pip/2.7/get-pip.py --output get-pip.py`
++    * `sudo python2 get-pip.py`
++    * `pip install lz4 pycryptodome`
++    * `sudo update-alternatives --install /usr/bin/python python /usr/bin/python2.7 1`
++1. Finally, clone the Atmosphère repository and run `make` under its root directory.
+\ No newline at end of file
+-- 
+2.53.0.windows.1
+

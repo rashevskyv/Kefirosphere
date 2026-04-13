@@ -1,0 +1,25 @@
+From f1faaa798496d33bc3752596851a652882bf7169 Mon Sep 17 00:00:00 2001
+From: rashevskyv <rashevsky.v@gmail.com>
+Date: Mon, 13 Apr 2026 01:10:22 +0300
+Subject: [PATCH 03/14] KEFIR: Added support for kiosk units
+
+---
+ libraries/libexosphere/source/fuse/fuse_api.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/libraries/libexosphere/source/fuse/fuse_api.cpp b/libraries/libexosphere/source/fuse/fuse_api.cpp
+index 927c611b3..ee34041a5 100644
+--- a/libraries/libexosphere/source/fuse/fuse_api.cpp
++++ b/libraries/libexosphere/source/fuse/fuse_api.cpp
+@@ -363,7 +363,7 @@ namespace ams::fuse {
+     }
+ 
+     RetailInteractiveDisplayState GetRetailInteractiveDisplayState() {
+-        return static_cast<RetailInteractiveDisplayState>(util::BitPack32{GetCommonOdmWord(4)}.Get<OdmWord4::RetailInteractiveDisplayState>());
++        return RetailInteractiveDisplayState_Disabled;
+     }
+ 
+     pmic::Regulator GetRegulator() {
+-- 
+2.53.0.windows.1
+

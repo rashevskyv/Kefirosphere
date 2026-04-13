@@ -1,0 +1,39 @@
+From c78535a3cc3f00172a59425cb1f38d49508b7a09 Mon Sep 17 00:00:00 2001
+From: rashevskyv <rashevsky.v@gmail.com>
+Date: Mon, 13 Apr 2026 14:09:03 +0300
+Subject: [PATCH] KEFIR 8GB: Force using 8gb DRAM config
+
+---
+ .../libexosphere/include/exosphere/pkg1/pkg1_boot_config.hpp    | 2 +-
+ libraries/libexosphere/source/fuse/fuse_api.cpp                 | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/libraries/libexosphere/include/exosphere/pkg1/pkg1_boot_config.hpp b/libraries/libexosphere/include/exosphere/pkg1/pkg1_boot_config.hpp
+index b61fb7e07..0b5708851 100644
+--- a/libraries/libexosphere/include/exosphere/pkg1/pkg1_boot_config.hpp
++++ b/libraries/libexosphere/include/exosphere/pkg1/pkg1_boot_config.hpp
+@@ -71,7 +71,7 @@ namespace ams::pkg1 {
+         u8 padding_38[0x200 - 0x38];
+ 
+         constexpr bool IsDevelopmentFunctionEnabled() const {
+-            return (this->flags1[0] & (1 << 1)) != 0;
++            return true;
+         }
+ 
+         constexpr bool IsSErrorDebugEnabled() const {
+diff --git a/libraries/libexosphere/source/fuse/fuse_api.cpp b/libraries/libexosphere/source/fuse/fuse_api.cpp
+index ee34041a5..4c7b9acac 100644
+--- a/libraries/libexosphere/source/fuse/fuse_api.cpp
++++ b/libraries/libexosphere/source/fuse/fuse_api.cpp
+@@ -323,7 +323,7 @@ namespace ams::fuse {
+ 
+     DramId GetDramId() {
+         /* Get the value. */
+-        return static_cast<DramId>(GetDramIdValue(util::BitPack32{GetCommonOdmWord(4)}));
++        return static_cast<DramId>(28);
+     }
+ 
+     HardwareType GetHardwareType() {
+-- 
+2.53.0.windows.1
+
