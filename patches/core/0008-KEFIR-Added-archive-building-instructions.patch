@@ -102,7 +102,7 @@ index 7d80c94be..c5dec096c 100644
 -	cd $(DIST_DIR); zip -r ../atmosphere-$(ATMOSPHERE_VERSION).zip ./*; cd ../;
 +	# cp troposphere/daybreak/daybreak.nro $(DIST_DIR)/switch/daybreak/daybreak.nro
 +	cp fusee/$(ATMOSPHERE_BOOT_OUT_DIR)/fusee.bin $(DIST_DIR)/bootloader/payloads/fusee.bin
-+	python utilities/insert_splash_screen.py ~/dev/_kefir/bootlogo/splash_logo.png $(DIST_DIR)/atmosphere/package3
++	python3 $(KEFIROSPHERE_DIR)/utilities/insert_splash_screen.py $(SPLASH_LOGO_PATH) $(DIST_DIR)/atmosphere/package3
 +	cd $(DIST_DIR); ls; rm -rf ../../../../../atmosphere-$(ATMOSPHERE_VERSION).zip; ls
 +	cd $(DIST_DIR); zip -r ../../../../../atmosphere-$(ATMOSPHERE_VERSION).zip ./*; cd ../;
  	rm -rf $(DIST_DIR)

@@ -12,7 +12,7 @@ diff --git a/Makefile b/Makefile
 index 906f4bf17..fa7991b67 100644
 --- a/Makefile
 +++ b/Makefile
-@@ -14,10 +14,16 @@ export KEF_VERSION
+@@ -14,10 +14,17 @@ export KEF_VERSION
  NPROCS := $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
  
  all: nx_release
@@ -21,7 +21,8 @@ index 906f4bf17..fa7991b67 100644
  
  THIS_MAKEFILE     := $(abspath $(lastword $(MAKEFILE_LIST)))
  CURRENT_DIRECTORY := $(abspath $(dir $(THIS_MAKEFILE)))
-+LIBNX_DIR := ../libnx
++# LIBNX_DIR and KEFIROSPHERE_DIR are passed from build.sh via make arguments
++LIBNX_DIR ?= ../libnx
 +
 +KEF_8GB_DIR := $(KEFIR_ROOT_DIR)/kefir/config/8gb
 +KEF_OC_DIR  := $(KEFIR_ROOT_DIR)/kefir/config/oc
@@ -66,7 +67,7 @@ index 906f4bf17..fa7991b67 100644
 +	@echo " Building logo in $(CURDIR)"
 +	@echo "---------------------------------------------------------"
 +	git checkout master
-+	python3 $(CURDIR)/stratosphere/boot/source/bmp_to_array.py
++	python3 $(KEFIROSPHERE_DIR)/utilities/bmp_to_array.py $(SPLASH_BMP_PATH) SplashScreen $(CURDIR)/stratosphere/boot/source
 +	$(MAKE) -C $(CURDIR)/stratosphere/boot clean -j$(NPROCS)
 +	@if ! git diff --quiet; then \
 +		git add . && git commit -m "changed logo"; \
@@ -75,7 +76,7 @@ index 906f4bf17..fa7991b67 100644
 +	fi
 +
 +	git checkout 8gb_DRAM
-+	python3 $(CURDIR)/stratosphere/boot/source/bmp_to_array.py
++	python3 $(KEFIROSPHERE_DIR)/utilities/bmp_to_array.py $(SPLASH_BMP_PATH) SplashScreen $(CURDIR)/stratosphere/boot/source
 +	$(MAKE) -C $(CURDIR)/stratosphere/boot clean -j$(NPROCS)
 +	@if ! git diff --quiet; then \
 +		git add . && git commit -m "changed logo"; \
@@ -91,7 +92,7 @@ index 906f4bf17..fa7991b67 100644
 +	@echo "---------------------------------------------------------"
 +	@echo ">>> Fetching latest hekate *_ram8GB.bin from GitHub..."
 +	@echo "---------------------------------------------------------"
-+	@python3 $(CURRENT_DIRECTORY)/utilities/fetch_hekate.py $(KEFIR_ROOT_DIR)/kefir $(KEF_8GB_DIR)/payload.bin
++	@python3 $(KEFIROSPHERE_DIR)/utilities/fetch_hekate.py $(KEFIR_ROOT_DIR)/kefir $(KEF_8GB_DIR)/payload.bin
 +	mkdir -p $(KEF_8GB_DIR)/bootloader/
 +	cp $(KEF_8GB_DIR)/payload.bin $(KEF_8GB_DIR)/bootloader/update.bin
 +	cp $(KEF_8GB_DIR)/payload.bin $(KEF_8GB_DIR)/atmosphere/reboot_payload.bin
@@ -113,7 +114,7 @@ index 906f4bf17..fa7991b67 100644
 +	mkdir -p $(KEF_8GB_DIR)/bootloader/payloads/
 +	cp fusee/out/nintendo_nx_arm_armv4t/release/package3 $(KEF_8GB_DIR)/atmosphere/package3
 +	cp fusee/out/nintendo_nx_arm_armv4t/release/fusee.bin $(KEF_8GB_DIR)/bootloader/payloads/fusee.bin
-+	python utilities/insert_splash_screen.py ~/dev/_kefir/bootlogo/splash_logo.png $(KEF_8GB_DIR)/atmosphere/package3
++	python3 $(KEFIROSPHERE_DIR)/utilities/insert_splash_screen.py $(SPLASH_LOGO_PATH) $(KEF_8GB_DIR)/atmosphere/package3
 +	@echo "---------------------------------------------------------"
 +	@echo "            FINISH building with 8GB DRAM!"
 +	@echo "---------------------------------------------------------"
@@ -142,7 +143,7 @@ index 906f4bf17..fa7991b67 100644
 +	$(MAKE) -f atmosphere.mk package3 ATMOSPHERE_GIT_REVISION="K$(KEF_VERSION)-40MB" -j$(NPROCS)
 +	mkdir -p $(KEF_40MB_DIR)/atmosphere/
 +	cp fusee/out/nintendo_nx_arm_armv4t/release/package3 $(KEF_40MB_DIR)/atmosphere/package3
-+	python utilities/insert_splash_screen.py ~/dev/_kefir/bootlogo/splash_logo.png $(KEF_40MB_DIR)/atmosphere/package3
++	python3 $(KEFIROSPHERE_DIR)/utilities/insert_splash_screen.py $(SPLASH_LOGO_PATH) $(KEF_40MB_DIR)/atmosphere/package3
 +	@echo "---------------------------------------------------------"
 +	@echo "            FINISH building 40MB!"
 +	@echo "---------------------------------------------------------"
