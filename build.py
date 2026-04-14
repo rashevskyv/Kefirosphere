@@ -322,7 +322,7 @@ def read_version(kefir_root: str) -> int:
 
 
 def bump_version(kefir_root: str) -> int:
-    """Increment version file and commit Kefirosphere. Returns new version."""
+    """Increment version file and commit changes. Returns new version."""
     version_file = Path(kefir_root) / "version"
     try:
         current = int(version_file.read_text().strip())
@@ -331,6 +331,14 @@ def bump_version(kefir_root: str) -> int:
     new_ver = current + 1
     version_file.write_text(str(new_ver) + "\n")
     log.info("Version bumped: %d → %d", current, new_ver)
+
+    # Commit kefir_root branch
+    try:
+        git("add", "version", cwd=kefir_root)
+        git("commit", "-m", f"build: bump version to {new_ver}", cwd=kefir_root)
+        log.info("Kefir root version committed: %d", new_ver)
+    except subprocess.CalledProcessError as e:
+        log.warning("Could not commit Kefir root directory:\n%s", e.stdout)
 
     # Commit Kefirosphere
     try:
