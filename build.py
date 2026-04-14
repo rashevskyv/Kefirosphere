@@ -548,10 +548,59 @@ def cleanup(orig_branch, orig_head):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Deploy
+# ─────────────────────────────────────────────────────────────────────────────
+
+def deploy_core_artifacts(env: dict):
+    """Copy core Atmosphere build output (atmosphere-out/) to KEFIR_ROOT_DIR/kefir/.
+
+    Called immediately after `make nx_release`, before variant builds (8gb_DRAM,
+    oc, 40mb) which each start with `make clean` and wipe the entire out/ tree.
+
+    The output directory is out/<board>_<arch>_<sub>/release/atmosphere-out
+    (ATMOSPHERE_VERSION := out => DIST_DIR = ATMOSPHERE_OUT_DIR/atmosphere-out).
+    We search for it dynamically since ATMOSPHERE_OUT_DIR depends on board/arch.
+    """
+    log.info("=== Deploying core Atmosphere artifacts ===")
+    out_base   = ATMOSPHERE_DIR / "out"
+    candidates = list(out_base.rglob("atmosphere-out")) if out_base.exists() else []
+    dist_dir   = next((c for c in candidates if c.is_dir()), None)
+    kefir_dest = Path(env["KEFIR_ROOT_DIR"]) / "kefir"
+
+    if not dist_dir:
+        log.error("atmosphere-out not found under %s — core artifacts NOT deployed", out_base)
+        return
+
+    log.info("Core deploy source : %s", dist_dir)
+    log.info("Core deploy target : %s", kefir_dest)
+
+    try:
+        kefir_dest.mkdir(parents=True, exist_ok=True)
+        copied = 0
+        for src in dist_dir.rglob("*"):
+            if src.is_file():
+                rel  = src.relative_to(dist_dir)
+                dst  = kefir_dest / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+                log.info("  [deploy] %s  ->  %s", src, dst)
+                copied += 1
+        log.info("Core deploy complete: %d file(s) -> %s", copied, kefir_dest)
+    except Exception as exc:
+        log.error("Core deployment failed: %s", exc)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Build
 # ─────────────────────────────────────────────────────────────────────────────
 
-NPROCS = os.cpu_count() or 4
+try:
+    # sched_getaffinity(0) returns CPUs actually available to this process
+    # (more accurate than os.cpu_count() in containers/WSL2/cgroups)
+    NPROCS = len(os.sched_getaffinity(0))
+except AttributeError:
+    # Windows or systems without sched_getaffinity
+    NPROCS = os.cpu_count() or 4
 
 
 def build(env, patches_to_apply, adv_flag):
@@ -597,6 +646,7 @@ def build(env, patches_to_apply, adv_flag):
         f"SPLASH_LOGO_PATH={env['SPLASH_LOGO_PATH']}",
         f"SPLASH_BMP_PATH={env['SPLASH_BMP_PATH']}",
         f"LIBNX_DIR={env['LIBNX_DIR']}",
+        f"NPROCS={NPROCS}",   # override Makefile's $(shell nproc) with our detected value
     ]
 
     prog = BuildProgress(total_files, all_patches, skipped_patches)
@@ -632,7 +682,11 @@ def build(env, patches_to_apply, adv_flag):
                      env["KEFIR_ROOT_DIR"], kef_8gb_dir], check=True)
                 run_make(["make", "clean", f"-j{NPROCS}"] + make_vars, progress=prog)
                 run_make(["make", "nx_release", f"-j{NPROCS}"] + make_vars, progress=prog)
-                
+
+                # Deploy core files NOW — before variant builds which run 'make clean'
+                # and wipe out/ entirely (8gb_DRAM/oc/40mb targets start with make clean)
+                deploy_core_artifacts(env)
+
                 if "8gb" in patches_to_apply:
                     run_make(["make", "8gb_DRAM", "SKIP_FETCH=1", f"-j{NPROCS}"] + make_vars, progress=prog)
                 if "oc" in patches_to_apply:
@@ -643,6 +697,7 @@ def build(env, patches_to_apply, adv_flag):
                 # Without core patches, we just build pure atmosphere
                 run_make(["make", "clean", f"-j{NPROCS}"] + make_vars, progress=prog)
                 run_make(["make", "nx_release", f"-j{NPROCS}"] + make_vars, progress=prog)
+                deploy_core_artifacts(env)
         except subprocess.CalledProcessError as e:
             log.error(
                 "\n============================================================\n"
@@ -668,31 +723,6 @@ def build(env, patches_to_apply, adv_flag):
         prog.stop(success)
         _log_on()
         if success:
-            log.info("=== Deploying built artifacts ===")
-
-            # Deploy core Atmosphere build: nx_release puts files into out/atmosphere-out/
-            if "core" in patches_to_apply:
-                dist_dir = ATMOSPHERE_DIR / "out" / "atmosphere-out"
-                kefir_dest = Path(env["KEFIR_ROOT_DIR"]) / "kefir"
-                log.info("Core deploy: %s -> %s", dist_dir, kefir_dest)
-                if not dist_dir.exists():
-                    log.error("Core build output directory not found: %s", dist_dir)
-                else:
-                    try:
-                        kefir_dest.mkdir(parents=True, exist_ok=True)
-                        copied_count = 0
-                        for file_path in dist_dir.rglob('*'):
-                            if file_path.is_file():
-                                rel_path = file_path.relative_to(dist_dir)
-                                target_path = kefir_dest / rel_path
-                                target_path.parent.mkdir(parents=True, exist_ok=True)
-                                shutil.copy2(file_path, target_path)
-                                log.info("  [core] %s -> %s", file_path, target_path)
-                                copied_count += 1
-                        log.info("Core deploy complete: %d files copied to %s", copied_count, kefir_dest)
-                    except Exception as e:
-                        log.error("Core deployment failed: %s", e)
-
             new_ver = bump_version(env["KEFIR_ROOT_DIR"])
             log.info("Version after build: %d", new_ver)
         cleanup(orig_branch, orig_head)
@@ -718,6 +748,7 @@ def main():
     log.info("  Atmosphere : %s", ATMOSPHERE_DIR)
     log.info("  Patches    : %s", PATCHES_DIR)
     log.info("  Variants   : %s", args.patches if args.patches else "None (Clean)")
+    log.info("  CPU cores  : %d (parallel jobs)", NPROCS)
     log.info("=" * 60)
 
     if not ATMOSPHERE_DIR.exists():
