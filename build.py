@@ -56,20 +56,10 @@ def _log_on():  logging.getLogger().addHandler(_ch)
 # Source file counting (for accurate progress)
 # ─────────────────────────────────────────────────────────────────────────────
 
-_BUILDS = 4          # master + 8gb + oc + 40mb
-_ARCH_FACTOR = 1.15  # some files compile twice (arm + arm64)
-
-
-def count_source_files() -> int:
-    """Count compilable source files in Atmosphere. Returns estimated total compilations."""
-    total = 0
-    for ext in ("*.cpp", "*.c", "*.s", "*.S", "*.cc", "*.cxx"):
-        # Exclude build output directories
-        for p in ATMOSPHERE_DIR.rglob(ext):
-            if "out" not in p.parts and "build" not in p.parts:
-                total += 1
-    # × 4 builds × arch overhead
-    return max(int(total * _BUILDS * _ARCH_FACTOR), 2000)
+# Hardcoded estimation to avoid 30+ seconds of file traversal.
+# Master branch compilation takes ~5600 files.
+# The 3 variant branches (8gb_DRAM, oc, 40mb) compile roughly 1 file each.
+_ESTIMATED_FILES = 5600
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Live progress display
@@ -442,10 +432,8 @@ NPROCS = os.cpu_count() or 4
 
 
 def build(env):
-    # Count source files for accurate progress estimation
-    log.info("Counting source files for progress estimation…")
-    total_files = count_source_files()
-    log.info("Estimated total compilations: ~%d", total_files)
+    # Use hardcoded estimation instead of slow source file counting
+    total_files = _ESTIMATED_FILES
 
     reset_atmosphere()
     orig_branch, orig_head = save_state()
