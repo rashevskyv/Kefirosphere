@@ -1,0 +1,64 @@
+From 3dc1bae48d163c57c7832fa3bfc7c53efa3e7ea1 Mon Sep 17 00:00:00 2001
+From: rashevskyv <rashevsky.v@gmail.com>
+Date: Wed, 15 Apr 2026 01:30:12 +0300
+Subject: [PATCH] KEFIR: Use KEF_VERSION env var for ATMOSPHERE_GIT_REVISION in
+ common.mk and system_module.mk
+
+---
+ libraries/config/common.mk             | 15 +++++++++++----
+ stratosphere/ams_mitm/system_module.mk | 13 +++++++++++++
+ 2 files changed, 24 insertions(+), 4 deletions(-)
+
+diff --git a/libraries/config/common.mk b/libraries/config/common.mk
+index 7ef3708ff..7f2f6436d 100644
+--- a/libraries/config/common.mk
++++ b/libraries/config/common.mk
+@@ -233,10 +233,17 @@ endif
+ #---------------------------------------------------------------------------------
+ export ATMOSPHERE_GIT_BRANCH   := $(shell git symbolic-ref --short HEAD)
+ 
+-ifeq ($(strip $(shell git status --porcelain 2>/dev/null)),)
+-export ATMOSPHERE_GIT_REVISION := $(ATMOSPHERE_GIT_BRANCH)-$(shell git rev-parse --short HEAD)
+-else
+-export ATMOSPHERE_GIT_REVISION := $(ATMOSPHERE_GIT_BRANCH)-$(shell git rev-parse --short HEAD)-dirty
++ifndef ATMOSPHERE_GIT_REVISION
++    ifdef KEF_VERSION
++        export ATMOSPHERE_GIT_REVISION := KEF-$(KEF_VERSION)
++    else
++        KEFIR_ROOT_DIR ?= /mnt/d/git/dev/_kefir
++        ifneq ("$(wildcard $(KEFIR_ROOT_DIR)/version)","")
++            export ATMOSPHERE_GIT_REVISION := KEF-$(shell cat $(KEFIR_ROOT_DIR)/version)
++        else
++            export ATMOSPHERE_GIT_REVISION := KEF-UNK
++        endif
++    endif
+ endif
+ 
+ export ATMOSPHERE_GIT_HASH := $(shell git rev-parse --short=16 HEAD)
+diff --git a/stratosphere/ams_mitm/system_module.mk b/stratosphere/ams_mitm/system_module.mk
+index af1d82213..ca7313a84 100644
+--- a/stratosphere/ams_mitm/system_module.mk
++++ b/stratosphere/ams_mitm/system_module.mk
+@@ -7,6 +7,19 @@ include $(dir $(abspath $(lastword $(MAKEFILE_LIST))))/../../libraries/config/te
+ 
+ ATMOSPHERE_SYSTEM_MODULE_TARGETS := kip
+ 
++ifndef ATMOSPHERE_GIT_REVISION
++    ifdef KEF_VERSION
++        export ATMOSPHERE_GIT_REVISION := KEF-$(KEF_VERSION)
++    else
++        KEFIR_ROOT_DIR ?= /mnt/d/git/dev/_kefir
++        ifneq ("$(wildcard $(KEFIR_ROOT_DIR)/version)","")
++            export ATMOSPHERE_GIT_REVISION := KEF-$(shell cat $(KEFIR_ROOT_DIR)/version)
++        else
++            export ATMOSPHERE_GIT_REVISION := KEF-UNK
++        endif
++    endif
++endif
++
+ #---------------------------------------------------------------------------------
+ # no real need to edit anything past this point unless you need to add additional
+ # rules for different file extensions
+-- 
+2.53.0.windows.1
+
