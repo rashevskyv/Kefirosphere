@@ -1,15 +1,15 @@
-From 276b6c12384a19a229a5ef789b1d66e9dc244576 Mon Sep 17 00:00:00 2001
+From 17ea595cc97d2725dfc84584482afb58fb5eb0b2 Mon Sep 17 00:00:00 2001
 From: rashevskyv <rashevsky.v@gmail.com>
-Date: Tue, 14 Apr 2026 19:21:30 +0300
+Date: Tue, 14 Apr 2026 22:21:53 +0300
 Subject: [PATCH] KEFIR: Added build instructions for kefir, 8GB, 40Mb and OC
  versions
 
 ---
- Makefile | 154 ++++++++++++++++++++++++++++++++++++++++++++++++++++++-
- 1 file changed, 153 insertions(+), 1 deletion(-)
+ Makefile | 139 ++++++++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 138 insertions(+), 1 deletion(-)
 
 diff --git a/Makefile b/Makefile
-index d85056f77..fa7991b67 100644
+index d85056f77..9c7dcde5f 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,29 @@
@@ -42,7 +42,7 @@ index d85056f77..fa7991b67 100644
  
  define ATMOSPHERE_ADD_TARGET
  
-@@ -39,4 +59,136 @@ $(eval $(call ATMOSPHERE_ADD_TARGETS, nx, nx-hac-001, arm-cortex-a57,))
+@@ -39,4 +59,121 @@ $(eval $(call ATMOSPHERE_ADD_TARGETS, nx, nx-hac-001, arm-cortex-a57,))
  
  clean-all: $(foreach config,$(ATMOSPHERE_BUILD_CONFIGS),clean-$(config))
  
@@ -100,20 +100,7 @@ index d85056f77..fa7991b67 100644
 +kefir-version:
 +	cd libraries/libstratosphere && $(MAKE) -j$(NPROCS) clean && cd ../../stratosphere/ams_mitm && $(MAKE) -j$(NPROCS) clean && cd ../.. && $(MAKE) -j$(NPROCS)
 +
-+fetch-hekate:
-+	@echo "---------------------------------------------------------"
-+	@echo ">>> Fetching latest hekate *_ram8GB.bin from GitHub..."
-+	@echo "---------------------------------------------------------"
-+	@python3 $(CURRENT_DIRECTORY)/utilities/fetch_hekate.py $(KEFIR_ROOT_DIR)/kefir $(KEF_8GB_DIR)/payload.bin
-+	mkdir -p $(KEF_8GB_DIR)/bootloader/
-+	cp $(KEF_8GB_DIR)/payload.bin $(KEF_8GB_DIR)/bootloader/update.bin
-+	cp $(KEF_8GB_DIR)/payload.bin $(KEF_8GB_DIR)/atmosphere/reboot_payload.bin
-+	@echo "---------------------------------------------------------"
-+
 +8gb_DRAM:
-+ifndef SKIP_FETCH
-+	$(MAKE) fetch-hekate
-+endif
 +	@echo "---------------------------------------------------------"
 +	@echo "            Built with 8GB DRAM!"
 +	@echo "---------------------------------------------------------"
@@ -162,7 +149,6 @@ index d85056f77..fa7991b67 100644
 +
 +kefir:
 +	git checkout master
-+	$(MAKE) fetch-hekate
 +	$(MAKE) clean -j$(NPROCS)
 +	$(MAKE) nx_release -j$(NPROCS)
 +	$(MAKE) 8gb_DRAM SKIP_FETCH=1
@@ -171,15 +157,14 @@ index d85056f77..fa7991b67 100644
 +
 +kefir_logo:
 +	git checkout master
-+	$(MAKE) fetch-hekate
 +	$(MAKE) clean -j$(NPROCS)
-+	$(MAKE) clean-logo 
++	$(MAKE) clean-logo
 +	$(MAKE) nx_release -j$(NPROCS)
 +	$(MAKE) 8gb_DRAM SKIP_FETCH=1
 +	$(MAKE) oc
 +	$(MAKE) 40mb
 +
-+.PHONY: all clean clean-all kefir-version update clean-logo clear fetch-hekate 8gb_DRAM oc kefir 40mb $(foreach config,$(ATMOSPHERE_BUILD_CONFIGS), $(config) clean-$(config))
++.PHONY: all clean clean-all kefir-version update clean-logo clear 8gb_DRAM oc kefir 40mb $(foreach config,$(ATMOSPHERE_BUILD_CONFIGS), $(config) clean-$(config))
 \ No newline at end of file
 -- 
 2.53.0.windows.1

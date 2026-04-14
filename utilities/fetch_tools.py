@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
-"""Modular download script for Kefirosphere tools."""
+"""Modular download script for Kefirosphere tools.
+
+Downloads release assets from GitHub and places them
+into the correct locations within the kefir root directory.
+"""
 
 import sys
 import os
 import io
-import zipfile
-import urllib.request
-import urllib.error
 import json
 import time
+import shutil
 import socket
+import zipfile
 import fnmatch
+import urllib.request
+import urllib.error
 from datetime import datetime
 
 # =====================================================================
@@ -27,215 +32,283 @@ TOOLS_CONFIG = [
                 "exclude": "*ram8GB*",
                 "action": "extract_zip",
                 "extract": [
-                    # matching files dynamically to destination
                     {"member": "bootloader/*", "dest": "{kefir_root_dir}/{member}"},
-                    {"member": "hekate_*.bin", "dest": "{kefir_root_dir}/payload.bin"}
-                ]
+                    {"member": "hekate_*.bin", "dest": "{kefir_root_dir}/payload.bin"},
+                ],
             },
             {
                 "match": "*ram8GB.bin",
                 "action": "download_file",
-                "dest": "{kefir_root_dir}/config/8gb/payload.bin"
-            }
-        ]
-    }
+                "dest": "{kef_8gb_dir}/payload.bin",
+            },
+        ],
+        "post": "copy_hekate_payload",
+    },
 ]
 
 # =====================================================================
+# .env helpers
+# =====================================================================
 
-ENV_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+ENV_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"
+)
+
+
+def _read_env_lines():
+    """Read .env file lines; returns empty list if file does not exist."""
+    if not os.path.exists(ENV_PATH):
+        return []
+    with open(ENV_PATH, "r", encoding="utf-8") as f:
+        return f.readlines()
+
 
 def get_env_var(key):
-    if not os.path.exists(ENV_PATH):
-        return None
-    with open(ENV_PATH, "r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip().startswith(key + "="):
-                return line.strip().split("=", 1)[1].strip()
+    for line in _read_env_lines():
+        if line.strip().startswith(key + "="):
+            return line.strip().split("=", 1)[1].strip()
     return None
 
+
 def update_env_var(key, value):
-    lines = []
+    lines = _read_env_lines()
     found = False
-    if os.path.exists(ENV_PATH):
-        with open(ENV_PATH, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-            
     for i, line in enumerate(lines):
         if line.strip().startswith(key + "="):
             lines[i] = f"{key}={value}\n"
             found = True
             break
-            
     if not found:
         lines.append(f"{key}={value}\n")
-        
     with open(ENV_PATH, "w", encoding="utf-8") as f:
         f.writelines(lines)
 
+
+# =====================================================================
+# User interaction
+# =====================================================================
+
+
 def ask_user(prompt_text):
-    try:
-        with open("/dev/tty", "w") as tty_out, open("/dev/tty", "r") as tty_in:
-            tty_out.write(f"\n{prompt_text} (y/n): ")
-            tty_out.flush()
-            ans = tty_in.readline().strip().lower()
-            return ans in ["y", "yes"]
-    except Exception:
-        pass
+    """Prompt user for y/n confirmation via stdin."""
     try:
         print(f"\n{prompt_text} (y/n): ", end="")
         sys.stdout.flush()
-        ans = input().strip().lower()
-        return ans in ["y", "yes"]
+        return input().strip().lower() in ("y", "yes")
     except EOFError:
         return False
 
-def fetch_with_retry(url, headers=None, retries=3, timeout=10, is_json=False):
-    if headers is None:
-        headers = {}
+
+# =====================================================================
+# Network
+# =====================================================================
+
+_UA = {"User-Agent": "Mozilla/5.0"}
+
+
+def fetch_with_retry(url, *, headers=None, retries=3, timeout=15, is_json=False):
+    """Fetch URL contents with automatic retries on network errors."""
+    hdrs = {**_UA, **(headers or {})}
     for attempt in range(retries):
         try:
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                if is_json:
-                    return json.load(r)
-                else:
-                    return r.read()
-        except (urllib.error.URLError, socket.timeout) as e:
-            print(f"[Помилка] Спроба {attempt+1}/{retries} не вдалася ({url}): {e}", file=sys.stderr)
+            req = urllib.request.Request(url, headers=hdrs)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.load(resp) if is_json else resp.read()
+        except (urllib.error.URLError, socket.timeout) as exc:
+            print(
+                f"[ERROR] Attempt {attempt + 1}/{retries} failed ({url}): {exc}",
+                file=sys.stderr,
+            )
             if attempt < retries - 1:
                 time.sleep(3)
             else:
-                raise e
+                raise
+
 
 def fetch_release_data(repo):
+    """Fetch latest release metadata from GitHub API."""
     url = f"https://api.github.com/repos/{repo}/releases/latest"
-    print(f"[{repo}] Завантаження інформації про реліз...")
+    print(f"[{repo}] Fetching latest release info...")
     try:
-        data = fetch_with_retry(url, headers={"User-Agent": "Mozilla/5.0"}, is_json=True)
-        return data
-    except Exception as e:
-        print(f"[{repo}] Помилка отримання даних про реліз: {e}", file=sys.stderr)
+        return fetch_with_retry(url, is_json=True)
+    except Exception as exc:
+        print(f"[{repo}] Failed to fetch release data: {exc}", file=sys.stderr)
         return None
 
-def process_extract_zip(asset_data, rules_extract, env_vars):
+
+# =====================================================================
+# Asset processors
+# =====================================================================
+
+
+def process_extract_zip(asset, rules_extract, env_vars):
+    """Download a ZIP asset and extract matching members."""
     try:
-        zip_data = fetch_with_retry(asset_data["browser_download_url"])
-    except Exception as e:
-        print(f"Помилка завантаження ZIP: {e}", file=sys.stderr)
+        zip_data = fetch_with_retry(asset["browser_download_url"])
+    except Exception as exc:
+        print(f"[ERROR] ZIP download failed: {exc}", file=sys.stderr)
         return False
 
     with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
-        members = zf.namelist()
-        for member in members:
-            # Перевіряємо правила для розпакування
-            for ex_rule in rules_extract:
-                if fnmatch.fnmatch(member, ex_rule["member"]):
-                    if member.endswith("/"):
-                        continue
-                        
-                    # Формуємо шлях з підстановкою змінних (kefir_root_dir, member)
-                    dest = ex_rule["dest"].format(member=member, **env_vars)
+        for member in zf.namelist():
+            if member.endswith("/"):
+                continue
+            for rule in rules_extract:
+                if fnmatch.fnmatch(member, rule["member"]):
+                    dest = rule["dest"].format(member=member, **env_vars)
                     os.makedirs(os.path.dirname(dest), exist_ok=True)
-                    
                     with zf.open(member) as src, open(dest, "wb") as dst:
                         dst.write(src.read())
-                    
+                    print(f"  extracted: {member} -> {dest}")
                     break
     return True
 
-def process_download_file(asset_data, dest_template, env_vars):
+
+def process_download_file(asset, dest_template, env_vars):
+    """Download a single file asset to the templated destination."""
     dest = dest_template.format(**env_vars)
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     try:
-        data = fetch_with_retry(asset_data["browser_download_url"])
+        data = fetch_with_retry(asset["browser_download_url"])
         with open(dest, "wb") as f:
             f.write(data)
+        print(f"  downloaded: {asset['name']} -> {dest}")
         return True
-    except Exception as e:
-        print(f"Помилка завантаження файлу: {e}", file=sys.stderr)
+    except Exception as exc:
+        print(f"[ERROR] File download failed: {exc}", file=sys.stderr)
         return False
 
+
+# =====================================================================
+# Post-download hooks
+# =====================================================================
+
+
+def copy_hekate_payload(env_vars):
+    """Copy ram8GB payload.bin into bootloader/ and atmosphere/ subdirs."""
+    kef_8gb_dir = env_vars["kef_8gb_dir"]
+    payload = os.path.join(kef_8gb_dir, "payload.bin")
+    if not os.path.exists(payload):
+        print(f"[HEKATE] WARNING: {payload} not found, skipping copies.", file=sys.stderr)
+        return
+
+    targets = [
+        os.path.join(kef_8gb_dir, "bootloader", "update.bin"),
+        os.path.join(kef_8gb_dir, "atmosphere", "reboot_payload.bin"),
+    ]
+    for dest in targets:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.copy2(payload, dest)
+        print(f"[HEKATE] Copied payload.bin -> {dest}")
+
+
+# Hook registry — maps config "post" value to callable
+_POST_HOOKS = {
+    "copy_hekate_payload": copy_hekate_payload,
+}
+
+# =====================================================================
+# Tool processing
+# =====================================================================
+
+_ACTIONS = {
+    "extract_zip": lambda asset, rule, env: process_extract_zip(asset, rule["extract"], env),
+    "download_file": lambda asset, rule, env: process_download_file(asset, rule["dest"], env),
+}
+
+
 def process_tool(tool_config, env_vars):
+    """Download and process all assets for a single tool configuration."""
     tool_id = tool_config["id"]
     repo = tool_config["repo"]
     rules = tool_config.get("rules", [])
-    
+
     while True:
         data = fetch_release_data(repo)
         if not data:
-            if ask_user(f"[{tool_id}] Помилка завантаження інформації про реліз. Спробувати ще раз? (Якщо 'n' - пропускаємо)"):
+            if ask_user(f"[{tool_id}] Failed to fetch release. Retry? ('n' to skip)"):
                 continue
             return False
-            
-        assets = data.get("assets", [])
+
         tag = data.get("tag_name", "unknown")
-        
+
+        # Check cached version in .env
         ver_key = f"{tool_id}_LATEST_VERSION"
         date_key = f"{tool_id}_LATEST_DATE"
-        
-        current_ver = get_env_var(ver_key)
-        if current_ver and current_ver == tag:
-            print(f"[{tool_id}] Версія ({tag}) збігається зі збереженою в .env. Пропускаємо.")
+        cached_ver = get_env_var(ver_key)
+
+        if cached_ver == tag:
+            print(f"[{tool_id}] Version ({tag}) matches .env cache. Skipping.")
             return True
 
-        if current_ver:
-            print(f"[{tool_id}] Знайдено нову версію: {current_ver} -> {tag}")
+        if cached_ver:
+            print(f"[{tool_id}] New version found: {cached_ver} -> {tag}")
         else:
-            print(f"[{tool_id}] Починаємо завантаження версії: {tag}")
-            
-        success_all = True
-        
-        for asset in assets:
+            print(f"[{tool_id}] Downloading version: {tag}")
+
+        # Match assets against rules and process
+        ok = True
+        for asset in data.get("assets", []):
             name = asset["name"]
-            matched_rule = None
+            matched = None
             for rule in rules:
                 if fnmatch.fnmatch(name, rule["match"]):
                     if "exclude" in rule and fnmatch.fnmatch(name, rule["exclude"]):
                         continue
-                    matched_rule = rule
+                    matched = rule
                     break
-            
-            if not matched_rule:
+            if not matched:
                 continue
-                
-            print(f"[{tool_id}] Обробка {name}...")
-            
-            action = matched_rule["action"]
-            if action == "extract_zip":
-                ok = process_extract_zip(asset, matched_rule["extract"], env_vars)
-                if not ok: success_all = False
-            elif action == "download_file":
-                ok = process_download_file(asset, matched_rule["dest"], env_vars)
-                if not ok: success_all = False
-                
-        if not success_all:
-            if ask_user(f"[{tool_id}] Під час завантаження сталася помилка. Спробувати ще раз? (Якщо 'n' - лишаємо як є)"):
+
+            print(f"[{tool_id}] Processing {name}...")
+            handler = _ACTIONS.get(matched["action"])
+            if handler:
+                if not handler(asset, matched, env_vars):
+                    ok = False
+            else:
+                print(f"[{tool_id}] Unknown action: {matched['action']}", file=sys.stderr)
+                ok = False
+
+        if not ok:
+            if ask_user(f"[{tool_id}] Download errors occurred. Retry? ('n' to keep as-is)"):
                 continue
             return False
-            
-        # Успіх
+
+        # Run post-download hook if configured
+        hook_name = tool_config.get("post")
+        if hook_name and hook_name in _POST_HOOKS:
+            _POST_HOOKS[hook_name](env_vars)
+
+        # Save version to .env
         update_env_var(ver_key, tag)
         update_env_var(date_key, datetime.now().strftime('"%Y-%m-%d %H:%M:%S"'))
-        print(f"[{tool_id}] Версію {tag} збережено у .env")
+        print(f"[{tool_id}] Version {tag} saved to .env")
         return True
+
+
+# =====================================================================
+# Entry point
+# =====================================================================
+
 
 def main():
     if len(sys.argv) < 2:
-        print(f"Використання: {sys.argv[0]} <kefir_root_dir>", file=sys.stderr)
+        print(f"Usage: {sys.argv[0]} <kefir_root_dir> [kef_8gb_dir]", file=sys.stderr)
         sys.exit(1)
 
     kefir_root_dir = sys.argv[1]
-    
-    # Змінні для підстановки у конфіг-правила (str.format)
+    kef_8gb_dir = sys.argv[2] if len(sys.argv) >= 3 else os.path.join(kefir_root_dir, "config", "8gb")
+
     env_vars = {
-        "kefir_root_dir": kefir_root_dir
+        "kefir_root_dir": kefir_root_dir,
+        "kef_8gb_dir": kef_8gb_dir,
     }
 
     for tool in TOOLS_CONFIG:
         process_tool(tool, env_vars)
-        
-    print("Всі утиліти успішно перевірені та завантажені.")
+
+    print("All tools checked and downloaded successfully.")
+
 
 if __name__ == "__main__":
     main()

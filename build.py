@@ -626,8 +626,10 @@ def build(env, patches_to_apply, adv_flag):
         prog.set(phase="Step 3/3 — Compiling targets", branch="master", module="—")
         try:
             if "core" in patches_to_apply:
-                # Run fetch_tools
-                run(["python3", str(SCRIPT_DIR / "utilities" / "fetch_tools.py"), env["KEFIR_ROOT_DIR"]], check=True)
+                # Run fetch_tools (kef_8gb_dir = KEFIR_ROOT_DIR/kefir/config/8gb, same as KEF_8GB_DIR in Makefile)
+                kef_8gb_dir = str(Path(env["KEFIR_ROOT_DIR"]) / "kefir" / "config" / "8gb")
+                run(["python3", str(SCRIPT_DIR / "utilities" / "fetch_tools.py"),
+                     env["KEFIR_ROOT_DIR"], kef_8gb_dir], check=True)
                 run_make(["make", "clean", f"-j{NPROCS}"] + make_vars, progress=prog)
                 run_make(["make", "nx_release", f"-j{NPROCS}"] + make_vars, progress=prog)
                 
@@ -667,39 +669,42 @@ def build(env, patches_to_apply, adv_flag):
         _log_on()
         if success:
             log.info("=== Deploying built artifacts ===")
-            dist_dir = ATMOSPHERE_DIR / "out" / "atmosphere-out"
-            kefir_dest = Path(env["KEFIR_ROOT_DIR"]) / "kefir"
-            if not dist_dir.exists():
-                # For clean atmosphere without patches, the dir is deleted but a zip remains
-                zips = list((ATMOSPHERE_DIR / "out").glob("atmosphere-*.zip"))
-                if zips:
+            # Kefir builds copy artifacts directly via Makefile targets (8gb_DRAM, oc, 40mb)
+            # so we don't need to deploy from atmosphere-out for core builds
+            if "core" not in patches_to_apply:
+                dist_dir = ATMOSPHERE_DIR / "out" / "atmosphere-out"
+                kefir_dest = Path(env["KEFIR_ROOT_DIR"]) / "kefir"
+                if not dist_dir.exists():
+                    # For clean atmosphere without patches, the dir is deleted but a zip remains
+                    zips = list((ATMOSPHERE_DIR / "out").glob("atmosphere-*.zip"))
+                    if zips:
+                        try:
+                            kefir_dest.mkdir(parents=True, exist_ok=True)
+                            with zipfile.ZipFile(zips[0], 'r') as zip_ref:
+                                for info in zip_ref.infolist():
+                                    zip_ref.extract(info, kefir_dest)
+                                    log.info("  -> Extracted: %s", info.filename)
+                            log.info("Deployment complete. Extracted %s.", zips[0].name)
+                        except Exception as e:
+                            log.error("Failed extracting zip: %s", e)
+                    else:
+                        log.error("Build output directory or zip not found: %s", dist_dir)
+                else:
                     try:
                         kefir_dest.mkdir(parents=True, exist_ok=True)
-                        with zipfile.ZipFile(zips[0], 'r') as zip_ref:
-                            for info in zip_ref.infolist():
-                                zip_ref.extract(info, kefir_dest)
-                                log.info("  -> Extracted: %s", info.filename)
-                        log.info("Deployment complete. Extracted %s.", zips[0].name)
+                        copied_count = 0
+                        for file_path in dist_dir.rglob('*'):
+                            if file_path.is_file():
+                                rel_path = file_path.relative_to(dist_dir)
+                                target_path = kefir_dest / rel_path
+                                target_path.parent.mkdir(parents=True, exist_ok=True)
+                                shutil.copy2(file_path, target_path)
+                                log.info("  -> Copied: %s", rel_path)
+                                copied_count += 1
+                        log.info("Deployment complete. Copied %d files.", copied_count)
+                        shutil.rmtree(dist_dir, ignore_errors=True)
                     except Exception as e:
-                        log.error("Failed extracting zip: %s", e)
-                else:
-                    log.error("Build output directory or zip not found: %s", dist_dir)
-            else:
-                try:
-                    kefir_dest.mkdir(parents=True, exist_ok=True)
-                    copied_count = 0
-                    for file_path in dist_dir.rglob('*'):
-                        if file_path.is_file():
-                            rel_path = file_path.relative_to(dist_dir)
-                            target_path = kefir_dest / rel_path
-                            target_path.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.copy2(file_path, target_path)
-                            log.info("  -> Copied: %s", rel_path)
-                            copied_count += 1
-                    log.info("Deployment complete. Copied %d files.", copied_count)
-                    shutil.rmtree(dist_dir, ignore_errors=True)
-                except Exception as e:
-                    log.error("Deployment failed: %s", e)
+                        log.error("Deployment failed: %s", e)
 
             new_ver = bump_version(env["KEFIR_ROOT_DIR"])
             log.info("Version after build: %d", new_ver)
