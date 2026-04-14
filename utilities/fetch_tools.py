@@ -216,7 +216,7 @@ def process_tool(tool_config, env_vars):
             
         # Успіх
         update_env_var(ver_key, tag)
-        update_env_var(date_key, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        update_env_var(date_key, datetime.now().strftime('"%Y-%m-%d %H:%M:%S"'))
         print(f"[{tool_id}] Версію {tag} збережено у .env")
         return True
 

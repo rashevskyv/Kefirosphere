@@ -57,9 +57,9 @@ def _log_on():  logging.getLogger().addHandler(_ch)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Hardcoded estimation to avoid 30+ seconds of file traversal.
-# Master branch compilation takes ~5600 files.
+# Master branch compilation takes ~4690 files.
 # The 3 variant branches (8gb_DRAM, oc, 40mb) compile roughly 1 file each.
-_ESTIMATED_FILES = 5600
+_ESTIMATED_FILES = 4690
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Live progress display
