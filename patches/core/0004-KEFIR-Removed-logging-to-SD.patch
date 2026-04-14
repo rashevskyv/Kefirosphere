@@ -1,15 +1,15 @@
-From 1b749596301846d70ecace0693a7246ce842907f Mon Sep 17 00:00:00 2001
+From d47ea38d3d225ff577797da5ff24a5a1908ec077 Mon Sep 17 00:00:00 2001
 From: rashevskyv <rashevsky.v@gmail.com>
-Date: Mon, 13 Apr 2026 01:11:17 +0300
-Subject: [PATCH 04/14] KEFIR: Removed logging to SD
+Date: Tue, 4 Jun 2024 16:53:32 +0300
+Subject: [PATCH] KEFIR: Removed logging to SD
 
 ---
- .../source/erpt/srv/erpt_srv_report.cpp       | 29 +++++++++----------
- .../source/erpt/srv/erpt_srv_report.hpp       |  7 +++--
- 2 files changed, 18 insertions(+), 18 deletions(-)
+ .../source/erpt/srv/erpt_srv_report.cpp       | 25 +++++++++----------
+ .../source/erpt/srv/erpt_srv_report.hpp       |  7 ++++--
+ 2 files changed, 17 insertions(+), 15 deletions(-)
 
 diff --git a/libraries/libstratosphere/source/erpt/srv/erpt_srv_report.cpp b/libraries/libstratosphere/source/erpt/srv/erpt_srv_report.cpp
-index ceec506b7..4ffad3084 100644
+index ceec506b7..9565ef65c 100644
 --- a/libraries/libstratosphere/source/erpt/srv/erpt_srv_report.cpp
 +++ b/libraries/libstratosphere/source/erpt/srv/erpt_srv_report.cpp
 @@ -20,10 +20,11 @@
@@ -25,18 +25,7 @@ index ceec506b7..4ffad3084 100644
                        report_id.uuid_data.time_low,
                        report_id.uuid_data.time_mid,
                        report_id.uuid_data.time_high_and_version,
-@@ -41,9 +42,7 @@ namespace ams::erpt::srv {
-     Report::~Report() {
-         this->CloseStream();
-         if (m_record->RemoveReference()) {
--            if (R_FAILED(this->DeleteStream(this->FileName().name))) {
--                /* TODO: Log failure? */
--            }
-+            this->DeleteStream(this->FileName().name);
-             delete m_record;
-         }
-     }
-@@ -54,23 +53,24 @@ namespace ams::erpt::srv {
+@@ -54,23 +55,24 @@ namespace ams::erpt::srv {
  
      Result Report::Open(ReportOpenType type) {
          switch (type) {
@@ -68,7 +57,7 @@ index ceec506b7..4ffad3084 100644
  
      Result Report::GetFlags(ReportFlagSet *out) const {
          *out = m_record->m_info.flags;
-@@ -78,15 +78,12 @@ namespace ams::erpt::srv {
+@@ -78,15 +80,12 @@ namespace ams::erpt::srv {
      }
  
      Result Report::SetFlags(ReportFlagSet flags) {

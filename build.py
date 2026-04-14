@@ -11,7 +11,7 @@ Kefirosphere Build Script
 Run via build.sh (which sources .env).
 """
 
-import os, sys, subprocess, logging, threading, re, time
+import os, sys, subprocess, logging, threading, re, time, shutil, argparse, zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -62,6 +62,81 @@ def _log_on():  logging.getLogger().addHandler(_ch)
 _ESTIMATED_FILES = 4690
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Interactive patch selection
+# ─────────────────────────────────────────────────────────────────────────────
+
+def interactive_select(patches: list) -> set:
+    try:
+        import msvcrt
+        has_msvcrt = True
+    except ImportError:
+        import tty, termios
+        has_msvcrt = False
+
+    selected = set(patches)
+    idx = 0
+    lines_written = 0
+
+    def draw():
+        nonlocal lines_written
+        if lines_written > 0:
+            sys.stdout.write(f"\033[{lines_written}A")
+        
+        sys.stdout.write("\033[J")
+        print(f"\033[1;36mInteractive Patch Selection\033[0m")
+        print("Use \033[1mUP/DOWN\033[0m arrows to navigate, \033[1mSPACE\033[0m to toggle, \033[1mENTER\033[0m to confirm.")
+        print("-" * 65)
+        out = []
+        for i, p in enumerate(patches):
+            chk = "[x]" if p in selected else "[ ]"
+            pointer = ">> " if i == idx else "   "
+            color = "\033[1;32m" if p in selected else "\033[2m"
+            out.append(f"{pointer}{color}{chk} {p}\033[0m")
+        print("\n".join(out))
+        lines_written = len(patches) + 3
+        sys.stdout.flush()
+
+    draw()
+    while True:
+        if has_msvcrt:
+            c = msvcrt.getch()
+            if c in (b'\x00', b'\xe0'):
+                c2 = msvcrt.getch()
+                if c2 == b'H': idx = max(0, idx - 1)
+                elif c2 == b'P': idx = min(len(patches)-1, idx + 1)
+            elif c == b' ':
+                p = patches[idx]
+                if p in selected: selected.remove(p)
+                else: selected.add(p)
+            elif c == b'\r':
+                break
+        else:
+            fd = sys.stdin.fileno()
+            old = termios.tcgetattr(fd)
+            try:
+                tty.setraw(fd)
+                c = sys.stdin.read(1)
+                if c == '\x1b':
+                    c2 = sys.stdin.read(2)
+                    if c2 == '[A': idx = max(0, idx - 1)
+                    elif c2 == '[B': idx = min(len(patches)-1, idx + 1)
+                elif c == ' ':
+                    p = patches[idx]
+                    if p in selected: selected.remove(p)
+                    else: selected.add(p)
+                elif c in ('\r', '\n'):
+                    break
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        draw()
+    
+    if lines_written > 0:
+        sys.stdout.write(f"\033[{lines_written}A\033[J")
+        sys.stdout.flush()
+
+    return set(patches) - selected
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Live progress display
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -73,7 +148,7 @@ class BuildProgress:
     _PATCH_WEIGHT  = 0.04   # 0-4%  : patching phase
     _PREBUILD_END  = 0.05   # 5%    : make starts
 
-    def __init__(self, total_files: int):
+    def __init__(self, total_files: int, all_patches: list = None, skipped_patches: set = None):
         self._lk      = threading.Lock()
         self._total   = total_files
         self._phase   = "Initializing…"
@@ -85,6 +160,16 @@ class BuildProgress:
         self._t0      = time.time()
         self._si      = 0
         self._alive   = True
+        
+        self._all_patches = all_patches or []
+        self._patch_statuses = {p: "waiting" for p in self._all_patches}
+        if skipped_patches:
+            for p in skipped_patches:
+                self._patch_statuses[p] = "skipped"
+
+    def set_patch_status(self, patch_name: str, status: str):
+        with self._lk:
+            self._patch_statuses[patch_name] = status
 
     def set(self, *, phase=None, branch=None, module=None,
             label=None, file_delta=0, base_pct=None):
@@ -98,9 +183,12 @@ class BuildProgress:
 
     def _pct(self) -> float:
         """Progress 0..1: patches contribute _PATCH_WEIGHT, the rest from files."""
+        if self._phase == "Build complete ✓":
+            return 1.0
         file_pct  = min(self._files / self._total, 1.0)
         make_part = (1.0 - self._PREBUILD_END) * file_pct
-        return min(self._base + self._PREBUILD_END + make_part, 1.0)
+        pct = self._base + self._PREBUILD_END + make_part
+        return min(pct, 0.99)
 
     def _elapsed(self):
         s = int(time.time() - self._t0); m, s = divmod(s, 60)
@@ -116,11 +204,28 @@ class BuildProgress:
         return f"  [{bar}] {int(pct * 100):3d}%"
 
     def _build_lines(self):
+        lines = []
+        if self._all_patches:
+            for p in self._all_patches:
+                st = self._patch_statuses.get(p, "waiting")
+                cb = " "
+                if st == "done":
+                    cb = f"{BGR}✓{R}"
+                elif st == "skipped":
+                    cb = f"{B}\033[34m✗{R}"
+                elif st == "processing":
+                    sp = _SPIN[self._si % len(_SPIN)]
+                    cb = f"{YL}{sp}{R}"
+                
+                color = DIM if st in ("waiting", "skipped") else ""
+                lines.append(f"  [{cb}] {color}{p}{R}")
+            lines.append(f"{DIM}{'─' * _W}{R}")
+
         sep = f"{DIM}{'─' * _W}{R}"
         sp  = _SPIN[self._si % len(_SPIN)]; self._si += 1
         pct = self._pct()
-        return [
-            sep,
+        
+        lines.extend([
             f"  {B}{BCY}Kefirosphere Build{R}   {sp}   {DIM}{self._elapsed()}{R}",
             sep,
             f"  {YL}Phase  {R}│ {self._tr(self._phase,  _W - 12)}",
@@ -130,7 +235,8 @@ class BuildProgress:
             sep,
             self._bar(pct),
             sep,
-        ]
+        ])
+        return lines
 
     def _draw(self, initial=False):
         if not IS_TTY:
@@ -290,6 +396,15 @@ def run_make(cmd, *, cwd=None, progress: BuildProgress = None):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_env():
+    # Load .env locally if run directly
+    env_file = SCRIPT_DIR / ".env"
+    if env_file.exists():
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, val = line.split("=", 1)
+                os.environ.setdefault(key.strip(), val.strip().strip("\"'"))
+
     return {
         "KEFIR_ROOT_DIR":   env_require("KEFIR_ROOT_DIR"),
         "KEFIROSPHERE_DIR": env_require("KEFIROSPHERE_DIR"),
@@ -368,7 +483,8 @@ def save_state():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def apply_patches(patch_dir: Path, label: str, progress: BuildProgress = None,
-                  patch_idx: list = None, total_patches: int = 1):
+                  patch_idx: list = None, total_patches: int = 1, skipped_patches: set = None):
+    if skipped_patches is None: skipped_patches = set()
     patches = sorted(patch_dir.glob("*.patch"))
     if not patches:
         log.warning("[%s] No patches found — skipping", label)
@@ -376,11 +492,18 @@ def apply_patches(patch_dir: Path, label: str, progress: BuildProgress = None,
 
     log.info("[%s] Applying %d patch(es)…", label, len(patches))
     for patch in patches:
+        if patch.name in skipped_patches:
+            log.info("[%s]   %s (SKIPPED)", label, patch.name)
+            continue
+            
         log.info("[%s]   %s", label, patch.name)
         if progress:
+            progress.set_patch_status(patch.name, "processing")
             progress.set(label=patch.name)
         try:
             git("am", str(patch))
+            if progress:
+                progress.set_patch_status(patch.name, "done")
         except subprocess.CalledProcessError as e:
             git("am", "--abort", check=False)
             log.error(
@@ -431,7 +554,7 @@ def cleanup(orig_branch, orig_head):
 NPROCS = os.cpu_count() or 4
 
 
-def build(env):
+def build(env, patches_to_apply, adv_flag):
     # Use hardcoded estimation instead of slow source file counting
     total_files = _ESTIMATED_FILES
 
@@ -439,9 +562,33 @@ def build(env):
     orig_branch, orig_head = save_state()
 
     # Count total patches for patch-phase progress
-    patch_dirs   = [PATCHES_DIR / "core", PATCHES_DIR / "8gb",
-                    PATCHES_DIR / "oc",   PATCHES_DIR / "40mb"]
-    total_patches = sum(len(list(d.glob("*.patch"))) for d in patch_dirs if d.exists()) or 1
+    patch_dirs = []
+    if "core" in patches_to_apply: patch_dirs.append(PATCHES_DIR / "core")
+    if "8gb" in patches_to_apply: patch_dirs.append(PATCHES_DIR / "8gb")
+    if "oc" in patches_to_apply: patch_dirs.append(PATCHES_DIR / "oc")
+    if "40mb" in patches_to_apply: patch_dirs.append(PATCHES_DIR / "40mb")
+    
+    all_patches = []
+    for d in patch_dirs:
+        if d.exists():
+            for p in sorted(d.glob("*.patch")):
+                all_patches.append(p.name)
+
+    skipped_patches = set()
+    if adv_flag and all_patches:
+        skipped_patches = interactive_select(all_patches)
+
+    active_variants = []
+    for variant in patches_to_apply:
+        variant_dir = PATCHES_DIR / variant
+        if variant_dir.exists():
+            variant_patches = {p.name for p in variant_dir.glob("*.patch")}
+            if variant_patches and variant_patches.issubset(skipped_patches) and variant != "core":
+                continue
+        active_variants.append(variant)
+    patches_to_apply = active_variants
+
+    total_patches = max(1, len([p for p in all_patches if p not in skipped_patches]))
     patch_idx = [0]
 
     make_vars = [
@@ -452,30 +599,48 @@ def build(env):
         f"LIBNX_DIR={env['LIBNX_DIR']}",
     ]
 
-    prog = BuildProgress(total_files)
+    prog = BuildProgress(total_files, all_patches, skipped_patches)
     _log_off()
     prog.start()
 
     success = False
     try:
         # Step 1 — core patches
-        prog.set(phase="Step 1/3 — Applying core patches",
-                 branch="master", module="patches/core")
-        apply_patches(PATCHES_DIR / "core", "core", prog, patch_idx, total_patches)
+        if "core" in patches_to_apply:
+            prog.set(phase="Step 1/3 — Applying core patches",
+                     branch="master", module="patches/core")
+            apply_patches(PATCHES_DIR / "core", "core", prog, patch_idx, total_patches, skipped_patches)
 
         # Step 2 — variant branches
         for branch_name, patch_subdir in [("8gb_DRAM", "8gb"), ("oc", "oc"), ("40mb", "40mb")]:
+            if patch_subdir not in patches_to_apply:
+                continue
             prog.set(phase=f"Step 2/3 — Branch: {branch_name}",
                      branch=branch_name, module=f"patches/{patch_subdir}")
             git("checkout", "-b", branch_name)
             apply_patches(PATCHES_DIR / patch_subdir, branch_name, prog,
-                          patch_idx, total_patches)
+                          patch_idx, total_patches, skipped_patches)
             git("checkout", orig_branch)
 
-        # Step 3 — make kefir
-        prog.set(phase="Step 3/3 — make kefir", branch="master", module="—")
+        # Step 3 — compilation
+        prog.set(phase="Step 3/3 — Compiling targets", branch="master", module="—")
         try:
-            run_make(["make", "kefir", f"-j{NPROCS}"] + make_vars, progress=prog)
+            if "core" in patches_to_apply:
+                # Run fetch_tools
+                run(["python3", str(SCRIPT_DIR / "utilities" / "fetch_tools.py"), env["KEFIR_ROOT_DIR"]], check=True)
+                run_make(["make", "clean", f"-j{NPROCS}"] + make_vars, progress=prog)
+                run_make(["make", "nx_release", f"-j{NPROCS}"] + make_vars, progress=prog)
+                
+                if "8gb" in patches_to_apply:
+                    run_make(["make", "8gb_DRAM", "SKIP_FETCH=1", f"-j{NPROCS}"] + make_vars, progress=prog)
+                if "oc" in patches_to_apply:
+                    run_make(["make", "oc", f"-j{NPROCS}"] + make_vars, progress=prog)
+                if "40mb" in patches_to_apply:
+                    run_make(["make", "40mb", f"-j{NPROCS}"] + make_vars, progress=prog)
+            else:
+                # Without core patches, we just build pure atmosphere
+                run_make(["make", "clean", f"-j{NPROCS}"] + make_vars, progress=prog)
+                run_make(["make", "nx_release", f"-j{NPROCS}"] + make_vars, progress=prog)
         except subprocess.CalledProcessError as e:
             log.error(
                 "\n============================================================\n"
@@ -501,6 +666,41 @@ def build(env):
         prog.stop(success)
         _log_on()
         if success:
+            log.info("=== Deploying built artifacts ===")
+            dist_dir = ATMOSPHERE_DIR / "out" / "atmosphere-out"
+            kefir_dest = Path(env["KEFIR_ROOT_DIR"]) / "kefir"
+            if not dist_dir.exists():
+                # For clean atmosphere without patches, the dir is deleted but a zip remains
+                zips = list((ATMOSPHERE_DIR / "out").glob("atmosphere-*.zip"))
+                if zips:
+                    try:
+                        kefir_dest.mkdir(parents=True, exist_ok=True)
+                        with zipfile.ZipFile(zips[0], 'r') as zip_ref:
+                            for info in zip_ref.infolist():
+                                zip_ref.extract(info, kefir_dest)
+                                log.info("  -> Extracted: %s", info.filename)
+                        log.info("Deployment complete. Extracted %s.", zips[0].name)
+                    except Exception as e:
+                        log.error("Failed extracting zip: %s", e)
+                else:
+                    log.error("Build output directory or zip not found: %s", dist_dir)
+            else:
+                try:
+                    kefir_dest.mkdir(parents=True, exist_ok=True)
+                    copied_count = 0
+                    for file_path in dist_dir.rglob('*'):
+                        if file_path.is_file():
+                            rel_path = file_path.relative_to(dist_dir)
+                            target_path = kefir_dest / rel_path
+                            target_path.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(file_path, target_path)
+                            log.info("  -> Copied: %s", rel_path)
+                            copied_count += 1
+                    log.info("Deployment complete. Copied %d files.", copied_count)
+                    shutil.rmtree(dist_dir, ignore_errors=True)
+                except Exception as e:
+                    log.error("Deployment failed: %s", e)
+
             new_ver = bump_version(env["KEFIR_ROOT_DIR"])
             log.info("Version after build: %d", new_ver)
         cleanup(orig_branch, orig_head)
@@ -510,11 +710,22 @@ def build(env):
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Kefirosphere Build Script")
+    parser.add_argument("--patches", nargs="*", default=["core", "8gb", "oc", "40mb"],
+                        help="Which patches to apply and build. E.g. --patches core 8gb. Pass empty (e.g. without arguments if using a wrapper) for clean Atmosphere.")
+    parser.add_argument("--adv", action="store_true", help="Advanced options. Interactive TUI patch selection.")
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+
     log.info("=" * 60)
     log.info("Kefirosphere Build — %s", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     log.info("  Atmosphere : %s", ATMOSPHERE_DIR)
     log.info("  Patches    : %s", PATCHES_DIR)
+    log.info("  Variants   : %s", args.patches if args.patches else "None (Clean)")
     log.info("=" * 60)
 
     if not ATMOSPHERE_DIR.exists():
@@ -522,7 +733,7 @@ def main():
         sys.exit(1)
 
     env = load_env()
-    ok  = build(env)
+    ok  = build(env, args.patches, args.adv)
     log.info("Log: %s", LOG_FILE)
     sys.exit(0 if ok else 1)
 

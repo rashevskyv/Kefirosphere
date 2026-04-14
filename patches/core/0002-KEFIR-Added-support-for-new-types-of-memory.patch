@@ -1,7 +1,7 @@
-From b11cffe66b132f33803bbcf23a19a03e7405f628 Mon Sep 17 00:00:00 2001
+From c526b283402094c563a40d93a88a9202fe768d5f Mon Sep 17 00:00:00 2001
 From: rashevskyv <rashevsky.v@gmail.com>
-Date: Sun, 12 Apr 2026 20:58:08 +0300
-Subject: [PATCH 02/14] KEFIR: Added support for new types of memory
+Date: Tue, 4 Jun 2024 16:51:49 +0300
+Subject: [PATCH 2/3] KEFIR: Added support for new types of memory
 
 ---
  fusee/program/source/mtc/fusee_mtc.cpp | 6 ++++++

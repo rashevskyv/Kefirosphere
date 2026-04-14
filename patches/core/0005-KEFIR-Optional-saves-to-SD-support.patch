@@ -1,29 +1,28 @@
-From a3a86ed2adaec16cf9d168261cb8eff1a46263f0 Mon Sep 17 00:00:00 2001
+From 57ae2e3b0bd53ddb391befa20015188a4cc22056 Mon Sep 17 00:00:00 2001
 From: rashevskyv <rashevsky.v@gmail.com>
-Date: Mon, 13 Apr 2026 01:16:54 +0300
-Subject: [PATCH 05/14] KEFIR: Optional saves to SD support
+Date: Tue, 4 Jun 2024 16:53:57 +0300
+Subject: [PATCH] KEFIR: Optional saves to SD support
 
 ---
- .../source/fs_mitm/fs_mitm_service.cpp        | 12 +++++++----
- .../source/fs_mitm/fsmitm_save_utils.cpp      | 20 +++++++++++++++++--
- 2 files changed, 26 insertions(+), 6 deletions(-)
+ .../source/fs_mitm/fs_mitm_service.cpp        | 11 ++++++----
+ .../source/fs_mitm/fsmitm_save_utils.cpp      | 21 ++++++++++++++++---
+ 2 files changed, 25 insertions(+), 7 deletions(-)
 
 diff --git a/stratosphere/ams_mitm/source/fs_mitm/fs_mitm_service.cpp b/stratosphere/ams_mitm/source/fs_mitm/fs_mitm_service.cpp
-index f82a6e806..cee8a971f 100644
+index f82a6e806..ad89f38a0 100644
 --- a/stratosphere/ams_mitm/source/fs_mitm/fs_mitm_service.cpp
 +++ b/stratosphere/ams_mitm/source/fs_mitm/fs_mitm_service.cpp
-@@ -203,11 +203,15 @@ namespace ams::mitm::fs {
+@@ -203,11 +203,14 @@ namespace ams::mitm::fs {
          /* Only redirect if the appropriate system setting is set. */
          R_UNLESS(GetSettingsItemBooleanValue("atmosphere", "fsmitm_redirect_saves_to_sd"), sm::mitm::ResultShouldForwardToSession());
  
 -        /* Only redirect if the specific title being accessed has a redirect save flag. */
 -        R_UNLESS(cfg::HasContentSpecificFlag(m_client_info.program_id, "redirect_save"), sm::mitm::ResultShouldForwardToSession());
++        /* DO NOT redirect if the specific title being accessed has a redirect save flag. */
++        R_UNLESS(!cfg::HasContentSpecificFlag(m_client_info.program_id, "do_not_redirect_save"), sm::mitm::ResultShouldForwardToSession());
  
 -        /* Only redirect account savedata. */
 -        R_UNLESS(attribute.type == fs::SaveDataType::Account, sm::mitm::ResultShouldForwardToSession());
-+        /* DO NOT redirect if the specific title being accessed has a redirect save flag. */
-+        R_UNLESS(!cfg::HasContentSpecificFlag(m_client_info.program_id, "do_not_redirect_save"), sm::mitm::ResultShouldForwardToSession());
-+
 +        /* Redirect account, bcat and device savedata. */
 +        R_UNLESS((attribute.type == fs::SaveDataType::Account) || (attribute.type == fs::SaveDataType::Device) || (attribute.type == fs::SaveDataType::Bcat) || (attribute.type == fs::SaveDataType::Cache), sm::mitm::ResultShouldForwardToSession());
 +
@@ -33,7 +32,7 @@ index f82a6e806..cee8a971f 100644
          /* Get enum type for space id. */
          auto space_id = static_cast<FsSaveDataSpaceId>(_space_id);
 diff --git a/stratosphere/ams_mitm/source/fs_mitm/fsmitm_save_utils.cpp b/stratosphere/ams_mitm/source/fs_mitm/fsmitm_save_utils.cpp
-index db5a88359..0b8b87172 100644
+index db5a88359..cbc508ab9 100644
 --- a/stratosphere/ams_mitm/source/fs_mitm/fsmitm_save_utils.cpp
 +++ b/stratosphere/ams_mitm/source/fs_mitm/fsmitm_save_utils.cpp
 @@ -15,6 +15,7 @@
@@ -48,7 +47,7 @@ index db5a88359..0b8b87172 100644
      Result SaveUtil::GetDirectorySaveDataPath(char *dst, size_t dst_size, ncm::ProgramId program_id, u8 space_id, const fs::SaveDataAttribute &attribute) {
          /* Saves should be separate for emunand vs sysnand. */
          const char *emummc_str = emummc::IsActive() ? "emummc" : "sysmmc";
-+                char m_emummc_name[0x7F + 1];
++        char m_emummc_name[0x7F + 1];
 +
 +        if (emummc::IsActive()) {
 +            util::TSNPrintf(m_emummc_name, sizeof(m_emummc_name), "RAW%04x", emummc::GetActiveId());
@@ -66,7 +65,7 @@ index db5a88359..0b8b87172 100644
  
          /* Get space_id, save_data_type strings. */
          const char *space_id_str, *save_type_str;
-@@ -101,9 +117,9 @@ namespace ams::mitm::fs {
+@@ -101,14 +117,13 @@ namespace ams::mitm::fs {
          const bool is_system = attribute.system_save_data_id != InvalidSystemSaveDataId && IsEmptyAccountId(attribute.user_id);
          size_t out_path_len;
          if (is_system) {
@@ -78,6 +77,11 @@ index db5a88359..0b8b87172 100644
          }
  
          R_UNLESS(out_path_len < dst_size, fs::ResultTooLongPath());
+ 
+         R_SUCCEED();
+     }
+-
+ }
 -- 
 2.53.0.windows.1
 
