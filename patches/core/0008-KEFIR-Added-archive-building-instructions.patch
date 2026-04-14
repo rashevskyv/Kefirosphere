@@ -92,7 +92,7 @@ index 7d80c94be..c5dec096c 100644
  	mkdir -p $(DIST_DIR)/stratosphere_romfs/atmosphere/contents/010000000000b240
  	mkdir -p $(DIST_DIR)/stratosphere_romfs/atmosphere/contents/010000000000d609
  	mkdir -p $(DIST_DIR)/stratosphere_romfs/atmosphere/contents/010000000000d623
-@@ -109,12 +64,12 @@ dist-no-debug: package3 $(CURRENT_DIRECTORY)/$(ATMOSPHERE_OUT_DIR)
+@@ -109,12 +64,11 @@ dist-no-debug: package3 $(CURRENT_DIRECTORY)/$(ATMOSPHERE_OUT_DIR)
  	cp stratosphere/memlet/$(ATMOSPHERE_OUT_DIR)/memlet.nsp $(DIST_DIR)/stratosphere_romfs/atmosphere/contents/0100000000000421/exefs.nsp
  	@PATH="$(DEVKITPRO)/tools/bin:$$PATH" build_romfs $(DIST_DIR)/stratosphere_romfs $(DIST_DIR)/atmosphere/stratosphere.romfs
  	rm -r $(DIST_DIR)/stratosphere_romfs
@@ -103,8 +103,7 @@ index 7d80c94be..c5dec096c 100644
 +	# cp troposphere/daybreak/daybreak.nro $(DIST_DIR)/switch/daybreak/daybreak.nro
 +	cp fusee/$(ATMOSPHERE_BOOT_OUT_DIR)/fusee.bin $(DIST_DIR)/bootloader/payloads/fusee.bin
 +	python3 $(KEFIROSPHERE_DIR)/utilities/insert_splash_screen.py $(SPLASH_LOGO_PATH) $(DIST_DIR)/atmosphere/package3
-+	cd $(DIST_DIR); ls; rm -rf ../../../../../atmosphere-$(ATMOSPHERE_VERSION).zip; ls
-+	cd $(DIST_DIR); zip -r ../../../../../atmosphere-$(ATMOSPHERE_VERSION).zip ./*; cd ../;
++	cp -rf $(DIST_DIR)/* $(KEFIR_ROOT_DIR)/kefir/
  	rm -rf $(DIST_DIR)
 -	cp fusee/$(ATMOSPHERE_BOOT_OUT_DIR)/fusee.bin $(CURRENT_DIRECTORY)/$(ATMOSPHERE_OUT_DIR)/fusee.bin
  
