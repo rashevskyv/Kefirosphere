@@ -669,26 +669,14 @@ def build(env, patches_to_apply, adv_flag):
         _log_on()
         if success:
             log.info("=== Deploying built artifacts ===")
-            # Kefir builds copy artifacts directly via Makefile targets (8gb_DRAM, oc, 40mb)
-            # so we don't need to deploy from atmosphere-out for core builds
-            if "core" not in patches_to_apply:
+
+            # Deploy core Atmosphere build: nx_release puts files into out/atmosphere-out/
+            if "core" in patches_to_apply:
                 dist_dir = ATMOSPHERE_DIR / "out" / "atmosphere-out"
                 kefir_dest = Path(env["KEFIR_ROOT_DIR"]) / "kefir"
+                log.info("Core deploy: %s -> %s", dist_dir, kefir_dest)
                 if not dist_dir.exists():
-                    # For clean atmosphere without patches, the dir is deleted but a zip remains
-                    zips = list((ATMOSPHERE_DIR / "out").glob("atmosphere-*.zip"))
-                    if zips:
-                        try:
-                            kefir_dest.mkdir(parents=True, exist_ok=True)
-                            with zipfile.ZipFile(zips[0], 'r') as zip_ref:
-                                for info in zip_ref.infolist():
-                                    zip_ref.extract(info, kefir_dest)
-                                    log.info("  -> Extracted: %s", info.filename)
-                            log.info("Deployment complete. Extracted %s.", zips[0].name)
-                        except Exception as e:
-                            log.error("Failed extracting zip: %s", e)
-                    else:
-                        log.error("Build output directory or zip not found: %s", dist_dir)
+                    log.error("Core build output directory not found: %s", dist_dir)
                 else:
                     try:
                         kefir_dest.mkdir(parents=True, exist_ok=True)
@@ -699,12 +687,11 @@ def build(env, patches_to_apply, adv_flag):
                                 target_path = kefir_dest / rel_path
                                 target_path.parent.mkdir(parents=True, exist_ok=True)
                                 shutil.copy2(file_path, target_path)
-                                log.info("  -> Copied: %s", rel_path)
+                                log.info("  [core] %s -> %s", file_path, target_path)
                                 copied_count += 1
-                        log.info("Deployment complete. Copied %d files.", copied_count)
-                        shutil.rmtree(dist_dir, ignore_errors=True)
+                        log.info("Core deploy complete: %d files copied to %s", copied_count, kefir_dest)
                     except Exception as e:
-                        log.error("Deployment failed: %s", e)
+                        log.error("Core deployment failed: %s", e)
 
             new_ver = bump_version(env["KEFIR_ROOT_DIR"])
             log.info("Version after build: %d", new_ver)
