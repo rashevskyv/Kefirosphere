@@ -27,7 +27,7 @@ index 7ef3708ff..7f2f6436d 100644
 +    else
 +        KEFIR_ROOT_DIR ?= /mnt/d/git/dev/_kefir
 +        ifneq ("$(wildcard $(KEFIR_ROOT_DIR)/version)","")
-+            export ATMOSPHERE_GIT_REVISION := KEF-$(shell cat $(KEFIR_ROOT_DIR)/version)
++            export ATMOSPHERE_GIT_REVISION := KEF-$(shell cat $(KEFIR_ROOT_DIR)/version | tr -d '\n\r')
 +        else
 +            export ATMOSPHERE_GIT_REVISION := KEF-UNK
 +        endif
@@ -49,7 +49,7 @@ index af1d82213..ca7313a84 100644
 +    else
 +        KEFIR_ROOT_DIR ?= /mnt/d/git/dev/_kefir
 +        ifneq ("$(wildcard $(KEFIR_ROOT_DIR)/version)","")
-+            export ATMOSPHERE_GIT_REVISION := KEF-$(shell cat $(KEFIR_ROOT_DIR)/version)
++            export ATMOSPHERE_GIT_REVISION := KEF-$(shell cat $(KEFIR_ROOT_DIR)/version | tr -d '\n\r')
 +        else
 +            export ATMOSPHERE_GIT_REVISION := KEF-UNK
 +        endif

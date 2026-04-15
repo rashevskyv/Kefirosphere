@@ -434,7 +434,7 @@ def bump_version(kefir_root: str) -> int:
     except Exception:
         current = 0
     new_ver = current + 1
-    version_file.write_text(str(new_ver) + "\n")
+    version_file.write_text(str(new_ver))
     log.info("Version bumped: %d → %d", current, new_ver)
 
     # Commit kefir_root branch
@@ -640,6 +640,7 @@ def build(env, patches_to_apply, adv_flag):
     total_patches = max(1, len([p for p in all_patches if p not in skipped_patches]))
     patch_idx = [0]
 
+    kef_version = read_version(env["KEFIR_ROOT_DIR"])
     make_vars = [
         f"KEFIROSPHERE_DIR={env['KEFIROSPHERE_DIR']}",
         f"KEFIR_ROOT_DIR={env['KEFIR_ROOT_DIR']}",
@@ -647,6 +648,7 @@ def build(env, patches_to_apply, adv_flag):
         f"SPLASH_BMP_PATH={env['SPLASH_BMP_PATH']}",
         f"LIBNX_DIR={env['LIBNX_DIR']}",
         f"NPROCS={NPROCS}",   # override Makefile's $(shell nproc) with our detected value
+        f"KEF_VERSION={kef_version}",  # pass clean integer → patch uses ifdef KEF_VERSION branch, no shell cat
     ]
 
     prog = BuildProgress(total_files, all_patches, skipped_patches)
