@@ -524,6 +524,43 @@ def apply_patches(patch_dir: Path, label: str, progress: BuildProgress = None,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Splash screen .inc generation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def generate_splash_inc(env: dict):
+    """Run bmp_to_array.py to create boot_splash_kefir.inc in Atmosphere sources.
+
+    This replaces the old approach of shipping the generated .inc inside the
+    git patch (0001-KEFIR-Changed-bootscreen.patch).  The file is large (~11 MB)
+    and depends on the user's custom splash image, so generating it at build
+    time keeps the patch lean and makes the splash easily swappable.
+    """
+    splash_src = Path(env["SPLASH_BMP_PATH"])
+    out_dir    = ATMOSPHERE_DIR / "stratosphere" / "boot" / "source"
+    script     = SCRIPT_DIR / "utilities" / "bmp_to_array.py"
+
+    log.info("Generating boot_splash_kefir.inc from %s", splash_src)
+
+    if not splash_src.exists():
+        raise FileNotFoundError(
+            f"SPLASH_BMP_PATH not found: {splash_src}\n"
+            "Check your .env — SPLASH_BMP_PATH must point to a valid BMP/PNG file."
+        )
+    if not out_dir.exists():
+        raise FileNotFoundError(
+            f"Atmosphere boot source dir not found: {out_dir}\n"
+            "Make sure core patches were applied before calling generate_splash_inc()."
+        )
+
+    run(
+        ["python3", str(script), str(splash_src), "SplashScreen", str(out_dir)],
+        cwd=SCRIPT_DIR,
+        check=True,
+    )
+    log.info("boot_splash_kefir.inc written to %s", out_dir)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Cleanup
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -662,6 +699,12 @@ def build(env, patches_to_apply, adv_flag):
             prog.set(phase="Step 1/3 — Applying core patches",
                      branch="master", module="patches/core")
             apply_patches(PATCHES_DIR / "core", "core", prog, patch_idx, total_patches, skipped_patches)
+
+        # Step 1b — generate splash .inc from user BMP (after core patches applied)
+        if "core" in patches_to_apply:
+            prog.set(phase="Step 1b/3 — Generating splash screen",
+                     branch="master", module="bmp_to_array")
+            generate_splash_inc(env)
 
         # Step 2 — variant branches
         for branch_name, patch_subdir in [("8gb_DRAM", "8gb"), ("oc", "oc"), ("40mb", "40mb")]:
