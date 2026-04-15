@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000001 Mon Sep 17 00:00:00 2001
+From: rashevskyv <rashevsky.v@gmail.com>
+Date: Tue, 15 Apr 2026 21:00:00 +0300
+Subject: [PATCH] KEFIR: Disable OLSC online save cloud sync by default to
+ prevent Wi-Fi hang
+
+Disables OLSC (online save cloud sync) auto download and upload by
+default. This prevents the "Please wait" hang that occurs when launching
+games with Wi-Fi on and a linked account that has save cloud issues.
+
+---
+ stratosphere/ams_mitm/source/set_mitm/settings_sd_kvs.cpp | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/stratosphere/ams_mitm/source/set_mitm/settings_sd_kvs.cpp b/stratosphere/ams_mitm/source/set_mitm/settings_sd_kvs.cpp
+index bdb25a8e0..be4554b4d 100644
+--- a/stratosphere/ams_mitm/source/set_mitm/settings_sd_kvs.cpp
++++ b/stratosphere/ams_mitm/source/set_mitm/settings_sd_kvs.cpp
+@@ -307,6 +307,12 @@ namespace ams::settings::fwdbg {
+         }
+ 
+         void LoadDefaultCustomSettings() {
++            /* Disable OLSC (online save cloud sync) communication.
++            * Prevents "Please wait" hang when launching games with Wi-Fi on
++            * and a linked account that has save cloud issues. */
++            R_ABORT_UNLESS(ParseSettingsItemValue("olsc", "default_auto_download_global_setting", "u8!0x0"));
++            R_ABORT_UNLESS(ParseSettingsItemValue("olsc", "default_auto_upload_global_setting",   "u8!0x0"));
++            
+             /* Disable uploading error reports to Nintendo. */
+             R_ABORT_UNLESS(ParseSettingsItemValue("eupld", "upload_enabled", "u8!0x0"));
+ 
+-- 
+2.53.0.windows.1
+
