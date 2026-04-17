@@ -1,0 +1,106 @@
+[
+    {
+        "id": "HEKATE",
+        "repo": "CTCaer/hekate",
+        "rules": [
+            {
+                "match": "hekate_*.zip",
+                "exclude": "*ram8GB*",
+                "action": "extract_zip",
+                "extract": [
+                    {"member": "bootloader/*", "dest": "{kefir_root_dir}/{member}"},
+                    {"member": "hekate_*.bin", "dest": "{kefir_root_dir}/payload.bin"}
+                ]
+            },
+            {
+                "match": "*ram8GB.bin",
+                "action": "download_file",
+                "dest": "{kef_8gb_dir}/payload.bin"
+            }
+        ],
+        "post": "copy_hekate_payload"
+    },
+    {
+        "id": "OVL_SYSMODULES",
+        "repo": "WerWolv/ovl-sysmodules",
+        "rules": [
+            {
+                "match": "ovlSysmodules.ovl",
+                "action": "download_file",
+                "dest": "{kefir_root_dir}/kefir/switch/.overlays/ovlSysmodules.ovl"
+            }
+        ]
+    },
+    {
+        "id": "EDIZON_OVERLAY",
+        "repo": "proferabg/EdiZon-Overlay",
+        "rules": [
+            {
+                "match": "ovlEdiZon.ovl",
+                "action": "download_file",
+                "dest": "{kefir_root_dir}/kefir/switch/.overlays/ovlEdiZon.ovl"
+            }
+        ]
+    },
+    {
+        "id": "NX_OVLLOADER",
+        "repo": "WerWolv/nx-ovlloader",
+        "rules": [
+            {
+                "match": "nx-ovlloader.zip",
+                "action": "extract_zip",
+                "extract": [
+                    {"member": "*", "dest": "{kefir_root_dir}/kefir/{member}"}
+                ]
+            }
+        ]
+    },
+    {
+        "id": "UBERHAND_OVERLAY",
+        "repo": "efosamark/Uberhand-Overlay",
+        "rules": [
+            {
+                "match": "ovlmenu.ovl",
+                "action": "download_file",
+                "dest": "{kefir_root_dir}/kefir/switch/.overlays/ovlmenu.ovl"
+            }
+        ]
+    },
+    {
+        "id": "SYS_CON",
+        "repo": "o0Zz/sys-con",
+        "rules": [
+            {
+                "match": "sys-con-*.zip",
+                "action": "extract_zip",
+                "extract": [
+                    {"member": "*", "dest": "{kefir_root_dir}/kefir/{member}"}
+                ]
+            }
+        ]
+    },
+    {
+        "id": "NXTHEMES_INSTALLER",
+        "repo": "exelix11/SwitchThemeInjector",
+        "rules": [
+            {
+                "match": "NXThemesInstaller.nro",
+                "action": "download_file",
+                "dest": "{kefir_root_dir}/kefir/switch/NxThemesInstaller/NXThemesInstaller.nro"
+            }
+        ]
+    },
+    {
+        "id": "MISSIONCONTROL",
+        "repo": "ndeadly/MissionControl",
+        "rules": [
+            {
+                "match": "MissionControl*.zip",
+                "action": "extract_zip",
+                "extract": [
+                    {"member": "*", "dest": "{kefir_root_dir}/kefir/{member}"}
+                ]
+            }
+        ]
+    }
+]

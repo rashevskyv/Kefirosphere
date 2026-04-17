@@ -14,37 +14,29 @@ import shutil
 import socket
 import zipfile
 import fnmatch
+import re
 import urllib.request
 import urllib.error
 from datetime import datetime
+
+# Load state manager
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from state_manager import state
 
 # =====================================================================
 # Configuration
 # =====================================================================
 
-TOOLS_CONFIG = [
-    {
-        "id": "HEKATE",
-        "repo": "CTCaer/hekate",
-        "rules": [
-            {
-                "match": "hekate_*.zip",
-                "exclude": "*ram8GB*",
-                "action": "extract_zip",
-                "extract": [
-                    {"member": "bootloader/*", "dest": "{kefir_root_dir}/{member}"},
-                    {"member": "hekate_*.bin", "dest": "{kefir_root_dir}/payload.bin"},
-                ],
-            },
-            {
-                "match": "*ram8GB.bin",
-                "action": "download_file",
-                "dest": "{kef_8gb_dir}/payload.bin",
-            },
-        ],
-        "post": "copy_hekate_payload",
-    },
-]
+CONFIG_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "tools_config.json"
+)
+
+def load_tools_config():
+    if not os.path.exists(CONFIG_PATH):
+        print(f"[ERROR] tools_config.json not found at {CONFIG_PATH}", file=sys.stderr)
+        sys.exit(1)
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 # =====================================================================
 # .env helpers
@@ -135,6 +127,155 @@ def fetch_release_data(repo):
         print(f"[{repo}] Failed to fetch release data: {exc}", file=sys.stderr)
         return None
 
+
+def get_kefir_version(kefir_root_dir):
+    ver_path = os.path.join(kefir_root_dir, "version")
+    if os.path.exists(ver_path):
+        with open(ver_path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    return "UNKNOWN"
+
+
+def get_current_hos_version(atmosphere_dir):
+    header_path = os.path.join(atmosphere_dir, "libraries", "libvapours", "include", "vapours", "ams", "ams_api_version.h")
+    if not os.path.exists(header_path):
+        return None
+    with open(header_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    
+    match_maj = re.search(r'#define\s+ATMOSPHERE_SUPPORTED_HOS_VERSION_MAJOR\s+(\d+)', content)
+    match_min = re.search(r'#define\s+ATMOSPHERE_SUPPORTED_HOS_VERSION_MINOR\s+(\d+)', content)
+    match_mic = re.search(r'#define\s+ATMOSPHERE_SUPPORTED_HOS_VERSION_MICRO\s+(\d+)', content)
+    
+    if match_maj and match_min and match_mic:
+        return f"{match_maj.group(1)}.{match_min.group(1)}.{match_mic.group(1)}"
+    return None
+
+
+def get_current_atmosphere_version(atmosphere_dir):
+    header_path = os.path.join(atmosphere_dir, "libraries", "libvapours", "include", "vapours", "ams", "ams_api_version.h")
+    if not os.path.exists(header_path):
+        return None
+    with open(header_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    
+    match_maj = re.search(r'#define\s+ATMOSPHERE_RELEASE_VERSION_MAJOR\s+(\d+)', content)
+    match_min = re.search(r'#define\s+ATMOSPHERE_RELEASE_VERSION_MINOR\s+(\d+)', content)
+    match_mic = re.search(r'#define\s+ATMOSPHERE_RELEASE_VERSION_MICRO\s+(\d+)', content)
+    
+    if match_maj and match_min and match_mic:
+        return f"{match_maj.group(1)}.{match_min.group(1)}.{match_mic.group(1)}"
+    return None
+
+
+def toggle_missioncontrol(enable, kefir_root_dir):
+    install_bat = os.path.join(kefir_root_dir, "kefir", "install.bat")
+    update_te = os.path.join(kefir_root_dir, "kefir", "switch", "kefir-updater", "update.te")
+    
+    if os.path.exists(install_bat):
+        with open(install_bat, 'r', encoding='utf-8') as f:
+            bat_data = f.read()
+        if enable:
+            bat_data = re.sub(r'^[ \t]*set missioncontrol=0', r'@REM set missioncontrol=0', bat_data, flags=re.MULTILINE|re.IGNORECASE)
+        else:
+            bat_data = re.sub(r'^[ \t]*@REM[ \t]*set missioncontrol=0', r'set missioncontrol=0', bat_data, flags=re.MULTILINE|re.IGNORECASE)
+        with open(install_bat, 'w', encoding='utf-8') as f:
+            f.write(bat_data)
+            
+    if os.path.exists(update_te):
+        with open(update_te, 'r', encoding='utf-8') as f:
+            te_data = f.read()
+        if enable:
+            te_data = re.sub(r'^[ \t]*missioncontrol=0', r'# missioncontrol=0', te_data, flags=re.MULTILINE)
+        else:
+            te_data = re.sub(r'^[ \t]*#[ \t]*missioncontrol=0', r'missioncontrol=0', te_data, flags=re.MULTILINE)
+        with open(update_te, 'w', encoding='utf-8') as f:
+            f.write(te_data)
+
+
+def summarize_with_openai(text):
+    api_key = get_env_var("OPENAI_API_KEY")
+    if not api_key:
+        print("[WARNING] OPENAI_API_KEY not found in .env. Skipping summary.")
+        return "Нова версія інструменту.", "New tool version."
+
+    text = text[:2000] if text else "Bugfixes and improvements."
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+    prompt = (
+        "Translate and summarize the following release changelog into exactly two versions: "
+        "one in Ukrainian and one in English. Each version MUST be a single, short sentence describing the most important change. "
+        "Do not include the tool name or version in the summary, just the changes. "
+        "Format the output exactly like this:\n"
+        "UKR: <ukrainian summary>\n"
+        "ENG: <english summary>\n\n"
+        f"Changelog:\n{text}"
+    )
+    data = {
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.3
+    }
+    
+    try:
+        req = urllib.request.Request(url, data=json.dumps(data).encode('utf-8'), headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            resp_body = json.loads(resp.read().decode('utf-8'))
+            reply = resp_body['choices'][0]['message']['content'].strip()
+            ukr, eng = "Оновлено інструмент.", "Tool updated."
+            for line in reply.split('\n'):
+                line = line.strip()
+                if line.startswith('UKR:'): ukr = line[4:].strip()
+                elif line.startswith('ENG:'): eng = line[4:].strip()
+            return ukr, eng
+    except Exception as e:
+        print(f"[ERROR] OpenAI API request failed: {e}", file=sys.stderr)
+        return "Нова версія інструменту.", "New tool version."
+
+
+def update_changelog_file(changelog_path, tool_id, tool_name, tool_version, release_url, summary_ukr, summary_eng, kefir_ver):
+    if not os.path.exists(changelog_path):
+        print(f"[{tool_id}] WARNING: Changelog not found at {changelog_path}", file=sys.stderr)
+        return
+        
+    with open(changelog_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    entry_ukr = f"* [**Оновлено**] [{tool_name} {tool_version}]({release_url}) — {summary_ukr}"
+    entry_eng = f"* [**Updated**] [{tool_name} {tool_version}]({release_url}) — {summary_eng}"
+
+    parts = content.split('#### **ENG**')
+    if len(parts) != 2:
+        print(f"[{tool_id}] WARNING: Could not find ENG section in changelog.", file=sys.stderr)
+        return
+        
+    ukr_part, eng_part = parts[0], '#### **ENG**' + parts[1]
+    
+    def inject(text, ver, entry):
+        if entry in text:
+            return text
+        ver_marker = f"**{ver}**"
+        if ver_marker in text:
+            pattern = re.compile(re.escape(ver_marker) + r'\s*\n')
+            match = pattern.search(text)
+            if match:
+                return text[:match.end()] + entry + "\n" + text[match.end():]
+            return text.replace(ver_marker, ver_marker + "\n" + entry)
+        match = re.search(r'\*\*\d+\*\*', text)
+        if match:
+            idx = match.start()
+            return text[:idx] + f"{ver_marker}\n{entry}\n\n" + text[idx:]
+        return text + f"\n{ver_marker}\n{entry}\n"
+            
+    new_ukr = inject(ukr_part, kefir_ver, entry_ukr)
+    new_eng = inject(eng_part, kefir_ver, entry_eng)
+    
+    with open(changelog_path, 'w', encoding='utf-8') as f:
+        f.write(new_ukr + new_eng)
+    print(f"[{tool_id}] Updated changelog for Kefir version {kefir_ver}.")
 
 # =====================================================================
 # Asset processors
@@ -228,18 +369,18 @@ def process_tool(tool_config, env_vars):
         if not data:
             if ask_user(f"[{tool_id}] Failed to fetch release. Retry? ('n' to skip)"):
                 continue
-            return False
+            return False, False
 
         tag = data.get("tag_name", "unknown")
 
-        # Check cached version in .env
+        # Check cached version in state manager
         ver_key = f"{tool_id}_LATEST_VERSION"
         date_key = f"{tool_id}_LATEST_DATE"
-        cached_ver = get_env_var(ver_key)
+        cached_ver = state.get(ver_key)
 
         if cached_ver == tag:
-            print(f"[{tool_id}] Version ({tag}) matches .env cache. Skipping.")
-            return True
+            print(f"[{tool_id}] Version ({tag}) matches cache. Skipping.")
+            return True, False
 
         if cached_ver:
             print(f"[{tool_id}] New version found: {cached_ver} -> {tag}")
@@ -272,18 +413,34 @@ def process_tool(tool_config, env_vars):
         if not ok:
             if ask_user(f"[{tool_id}] Download errors occurred. Retry? ('n' to keep as-is)"):
                 continue
-            return False
+            return False, False
 
         # Run post-download hook if configured
         hook_name = tool_config.get("post")
         if hook_name and hook_name in _POST_HOOKS:
             _POST_HOOKS[hook_name](env_vars)
 
-        # Save version to .env
-        update_env_var(ver_key, tag)
-        update_env_var(date_key, datetime.now().strftime('"%Y-%m-%d %H:%M:%S"'))
-        print(f"[{tool_id}] Version {tag} saved to .env")
-        return True
+        # Update changelog
+        kefir_ver = get_kefir_version(env_vars["kefir_root_dir"])
+        if kefir_ver and kefir_ver != "UNKNOWN":
+            body = data.get("body", "")
+            release_url = data.get("html_url", f"https://github.com/{repo}/releases/tag/{tag}")
+            print(f"[{tool_id}] Generating summary via OpenAI...")
+            ukr_sum, eng_sum = summarize_with_openai(body)
+            changelog_path = os.path.join(env_vars["kefir_root_dir"], "changelog")
+            
+            tool_name_map = {"HEKATE": "Hekate"}
+            display_name = tool_name_map.get(tool_id, tool_id.replace("_", " ").title())
+            update_changelog_file(
+                changelog_path, tool_id, display_name, tag, release_url,
+                ukr_sum, eng_sum, kefir_ver
+            )
+
+        # Save version to state manager
+        state.set(ver_key, tag)
+        state.set(date_key, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        print(f"[{tool_id}] Version {tag} saved to state")
+        return True, True
 
 
 # =====================================================================
@@ -292,20 +449,59 @@ def process_tool(tool_config, env_vars):
 
 
 def main():
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <kefir_root_dir> [kef_8gb_dir]", file=sys.stderr)
+    kefir_root_dir = get_env_var("KEFIR_ROOT_DIR")
+    if not kefir_root_dir:
+        print("[ERROR] KEFIR_ROOT_DIR is not set in .env", file=sys.stderr)
         sys.exit(1)
 
-    kefir_root_dir = sys.argv[1]
-    kef_8gb_dir = sys.argv[2] if len(sys.argv) >= 3 else os.path.join(kefir_root_dir, "config", "8gb")
+    kef_8gb_dir = os.path.join(kefir_root_dir, "kefir", "config", "8gb")
 
     env_vars = {
         "kefir_root_dir": kefir_root_dir,
         "kef_8gb_dir": kef_8gb_dir,
     }
 
-    for tool in TOOLS_CONFIG:
-        process_tool(tool, env_vars)
+    # -- HOS checks --
+    atmosphere_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "Atmosphere")
+    current_hos = get_current_hos_version(atmosphere_dir)
+    cached_hos = state.get("HOS_VERSION")
+    
+    hos_bumped = False
+    if current_hos and cached_hos:
+        o_parts = cached_hos.split('.')
+        c_parts = current_hos.split('.')
+        if len(o_parts) >= 2 and len(c_parts) >= 2:
+            if o_parts[0] != c_parts[0] or o_parts[1] != c_parts[1]:
+                hos_bumped = True
+    elif current_hos and not cached_hos:
+        hos_bumped = True
+
+    mc_updated = False
+
+    tools_config = load_tools_config()
+    for tool in tools_config:
+        ok, downloaded = process_tool(tool, env_vars)
+        if tool["id"] == "MISSIONCONTROL" and downloaded:
+            mc_updated = True
+
+    # -- MissionControl Toggling --
+    if hos_bumped and not mc_updated:
+        print(f"[HOS] HOS bumped ({cached_hos} -> {current_hos}) without a MissionControl update. Disabling MissionControl.")
+        toggle_missioncontrol(False, kefir_root_dir)
+    elif mc_updated:
+        print(f"[HOS] MissionControl updated. Enabling MissionControl.")
+        toggle_missioncontrol(True, kefir_root_dir)
+
+    if current_hos and hos_bumped:
+        state.set("HOS_VERSION", current_hos)
+        print(f"[HOS] HOS_VERSION {current_hos} saved to state")
+
+    current_ams = get_current_atmosphere_version(atmosphere_dir)
+    if current_ams:
+        cached_ams = state.get("ATMOSPHERE_LATEST_VERSION")
+        if cached_ams != current_ams:
+            state.set("ATMOSPHERE_LATEST_VERSION", current_ams)
+            print(f"[AMS] ATMOSPHERE_LATEST_VERSION {current_ams} saved to state")
 
     print("All tools checked and downloaded successfully.")
 

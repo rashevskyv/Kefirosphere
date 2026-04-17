@@ -720,11 +720,15 @@ def build(env, patches_to_apply, adv_flag):
         # Step 3 — compilation
         prog.set(phase="Step 3/3 — Compiling targets", branch="master", module="—")
         try:
+            tegra_dir = (SCRIPT_DIR / ".." / "TegraExplorer").resolve()
+            if tegra_dir.exists():
+                prog.set(phase="Step 3.1 — Compiling TegraExplorer", module="TegraExplorer")
+                run_make(["make", "clean"], cwd=tegra_dir, progress=prog)
+                run_make(["make", f"-j{NPROCS}"] + make_vars, cwd=tegra_dir, progress=prog)
+                prog.set(phase="Step 3.2 — Compiling targets", branch="master", module="—")
+                
             if "core" in patches_to_apply:
-                # Run fetch_tools (kef_8gb_dir = KEFIR_ROOT_DIR/kefir/config/8gb, same as KEF_8GB_DIR in Makefile)
-                kef_8gb_dir = str(Path(env["KEFIR_ROOT_DIR"]) / "kefir" / "config" / "8gb")
-                run(["python3", str(SCRIPT_DIR / "utilities" / "fetch_tools.py"),
-                     env["KEFIR_ROOT_DIR"], kef_8gb_dir], check=True)
+                run(["python3", str(SCRIPT_DIR / "utilities" / "fetch_tools.py")], check=True)
                 run_make(["make", "clean", f"-j{NPROCS}"] + make_vars, progress=prog)
                 run_make(["make", "nx_release", f"-j{NPROCS}"] + make_vars, progress=prog)
 
