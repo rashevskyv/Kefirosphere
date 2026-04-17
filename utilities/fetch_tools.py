@@ -58,7 +58,16 @@ def _read_env_lines():
 def get_env_var(key):
     for line in _read_env_lines():
         if line.strip().startswith(key + "="):
-            return line.strip().split("=", 1)[1].strip()
+            val = line.strip().split("=", 1)[1].strip()
+            # Normalize path if it looks like WSL /mnt/d/...
+            if key.endswith("_DIR") or key.endswith("_PATH"):
+                if sys.platform == "win32" and val.startswith("/mnt/"):
+                    parts = val.split("/")
+                    if len(parts) >= 3:
+                        drive = parts[2].upper()
+                        val = drive + ":" + "\\" + "\\".join(parts[3:])
+                val = os.path.normpath(val)
+            return val
     return None
 
 
@@ -95,17 +104,46 @@ def ask_user(prompt_text):
 # Network
 # =====================================================================
 
-_UA = {"User-Agent": "Mozilla/5.0"}
+_UA = {"User-Agent": "Kefirosphere-build/1.0"}
+
+
+def _github_headers():
+    """Build GitHub API request headers, including auth token if available."""
+    hdrs = dict(_UA)
+    token = get_env_var("GITHUB_TOKEN")
+    if token:
+        hdrs["Authorization"] = f"Bearer {token}"
+    return hdrs
 
 
 def fetch_with_retry(url, *, headers=None, retries=3, timeout=15, is_json=False):
-    """Fetch URL contents with automatic retries on network errors."""
+    """Fetch URL contents with automatic retries on network/transient errors.
+    
+    Rate-limit (HTTP 403/429) errors are NOT retried — caller must handle them.
+    """
     hdrs = {**_UA, **(headers or {})}
     for attempt in range(retries):
         try:
             req = urllib.request.Request(url, headers=hdrs)
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.load(resp) if is_json else resp.read()
+        except urllib.error.HTTPError as exc:
+            if exc.code in (403, 429):
+                # Rate limit — no point retrying immediately
+                retry_after = exc.headers.get("Retry-After") or exc.headers.get("X-RateLimit-Reset")
+                raise urllib.error.HTTPError(
+                    exc.url, exc.code,
+                    f"rate limit exceeded (Retry-After: {retry_after})",
+                    exc.headers, exc.fp
+                ) from None
+            print(
+                f"[ERROR] Attempt {attempt + 1}/{retries} failed ({url}): HTTP {exc.code}",
+                file=sys.stderr,
+            )
+            if attempt < retries - 1:
+                time.sleep(3)
+            else:
+                raise
         except (urllib.error.URLError, socket.timeout) as exc:
             print(
                 f"[ERROR] Attempt {attempt + 1}/{retries} failed ({url}): {exc}",
@@ -122,10 +160,39 @@ def fetch_release_data(repo):
     url = f"https://api.github.com/repos/{repo}/releases/latest"
     print(f"[{repo}] Fetching latest release info...")
     try:
-        return fetch_with_retry(url, is_json=True)
+        return fetch_with_retry(url, headers=_github_headers(), is_json=True)
+    except urllib.error.HTTPError as exc:
+        if exc.code in (403, 429):
+            print(f"[{repo}] GitHub rate limit exceeded. Add GITHUB_TOKEN to .env to increase limits (5000 req/hr vs 60).", file=sys.stderr)
+        else:
+            print(f"[{repo}] Failed to fetch release data: HTTP {exc.code}", file=sys.stderr)
+        return None
     except Exception as exc:
         print(f"[{repo}] Failed to fetch release data: {exc}", file=sys.stderr)
         return None
+
+
+def fetch_tag_message(repo, tag):
+    """Fetch tag annotation message or commit message (fallback for empty release body)."""
+    try:
+        # 1. Get the tag ref to find the object URL
+        ref_url = f"https://api.github.com/repos/{repo}/git/refs/tags/{tag}"
+        ref_data = fetch_with_retry(ref_url, headers=_github_headers(), is_json=True)
+        
+        if not ref_data or "object" not in ref_data:
+            return None
+
+        obj_type = ref_data["object"]["type"]
+        obj_url = ref_data["object"]["url"]
+
+        # 2. Fetch the object (either a 'tag' or a 'commit')
+        obj_data = fetch_with_retry(obj_url, headers=_github_headers(), is_json=True)
+        if obj_data and obj_data.get("message"):
+            return obj_data["message"].strip()
+            
+    except Exception:
+        pass
+    return None
 
 
 def get_kefir_version(kefir_root_dir):
@@ -193,50 +260,65 @@ def toggle_missioncontrol(enable, kefir_root_dir):
             f.write(te_data)
 
 
-def summarize_with_openai(text):
+def summarize_with_openai(text, tool_id="?"):
     api_key = get_env_var("OPENAI_API_KEY")
     if not api_key:
-        print("[WARNING] OPENAI_API_KEY not found in .env. Skipping summary.")
+        print(f"[{tool_id}] WARNING: OPENAI_API_KEY not found in .env. Skipping summary.")
         return "Нова версія інструменту.", "New tool version."
 
-    text = text[:2000] if text else "Bugfixes and improvements."
+    if not text or not text.strip():
+        print(f"[{tool_id}] Release body and name are both empty, using fallback summary.")
+        return "Оновлено до нової версії.", "Updated to a new version."
+
+    clipped = text[:4000]
+    print(f"[{tool_id}] --- GitHub release body (first 500 chars sent to AI) ---")
+    print(clipped[:500].strip())
+    print(f"[{tool_id}] --- end ({len(clipped)} chars total) ---")
+
     url = "https://api.openai.com/v1/chat/completions"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}"
     }
     prompt = (
-        "Translate and summarize the following release changelog into exactly two versions: "
-        "one in Ukrainian and one in English. Each version MUST be a single, short sentence describing the most important change. "
-        "Do not include the tool name or version in the summary, just the changes. "
-        "Format the output exactly like this:\n"
-        "UKR: <ukrainian summary>\n"
-        "ENG: <english summary>\n\n"
-        f"Changelog:\n{text}"
+        "You are a changelog translator for a Nintendo Switch custom firmware project.\n"
+        "Summarize the following GitHub release notes into exactly two lines:\n"
+        "  UKR: <one sentence in Ukrainian describing the key change(s)>\n"
+        "  ENG: <one sentence in English describing the key change(s)>\n\n"
+        "Rules:\n"
+        "- Be specific: mention actual features, fixes, or platform support from the text.\n"
+        "- Do NOT write vague phrases like 'bug fixes and improvements' or 'new version' unless that is truly all the changelog says.\n"
+        "- Do NOT include the tool name or version number in the summary.\n"
+        "- Output ONLY the two lines, nothing else.\n\n"
+        f"Release notes:\n{clipped}"
     )
     data = {
         "model": "gpt-4o-mini",
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.3
+        "temperature": 0.2
     }
-    
+
     try:
-        req = urllib.request.Request(url, data=json.dumps(data).encode('utf-8'), headers=headers)
+        req = urllib.request.Request(url, data=json.dumps(data, ensure_ascii=False).encode('utf-8'), headers=headers)
         with urllib.request.urlopen(req, timeout=30) as resp:
             resp_body = json.loads(resp.read().decode('utf-8'))
             reply = resp_body['choices'][0]['message']['content'].strip()
-            ukr, eng = "Оновлено інструмент.", "Tool updated."
+            # Write AI response safely (handles Cyrillic on Windows)
+            safe_reply = reply.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
+            sys.stdout.buffer.write(f"[{tool_id}] AI response: {safe_reply}\n".encode('utf-8'))
+            sys.stdout.flush()
+            ukr, eng = "Оновлено до нової версії.", "Updated to a new version."
             for line in reply.split('\n'):
                 line = line.strip()
                 if line.startswith('UKR:'): ukr = line[4:].strip()
                 elif line.startswith('ENG:'): eng = line[4:].strip()
             return ukr, eng
     except Exception as e:
-        print(f"[ERROR] OpenAI API request failed: {e}", file=sys.stderr)
-        return "Нова версія інструменту.", "New tool version."
+        print(f"[{tool_id}] ERROR: OpenAI API request failed: {e}", file=sys.stderr)
+        return "Оновлено до нової версії.", "Updated to a new version."
 
 
-def update_changelog_file(changelog_path, tool_id, tool_name, tool_version, release_url, summary_ukr, summary_eng, kefir_ver):
+def update_changelog_file(changelog_path, tool_id, tool_name, tool_version, release_url, summary_ukr, summary_eng, kefir_ver, hos_version=None):
     if not os.path.exists(changelog_path):
         print(f"[{tool_id}] WARNING: Changelog not found at {changelog_path}", file=sys.stderr)
         return
@@ -273,9 +355,38 @@ def update_changelog_file(changelog_path, tool_id, tool_name, tool_version, rele
     new_ukr = inject(ukr_part, kefir_ver, entry_ukr)
     new_eng = inject(eng_part, kefir_ver, entry_eng)
     
+    full_content = new_ukr + new_eng
+    
     with open(changelog_path, 'w', encoding='utf-8') as f:
-        f.write(new_ukr + new_eng)
+        f.write(full_content)
+        
+    # Sync HOS version in headers immediately
+    sync_hos_in_changelog(changelog_path, hos_version)
+    
     print(f"[{tool_id}] Updated changelog for Kefir version {kefir_ver}.")
+
+def sync_hos_in_changelog(changelog_path, hos_version):
+    if not hos_version or not os.path.exists(changelog_path):
+        return
+        
+    with open(changelog_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    # Match both old all-caps UKR and proper-case ENG variants
+    ukr_pattern = r'\*\*[Пп][Оо][Вв][Нн][Аа] [Пп][Іі][Дд][Тт][Рр][Ии][Мм][Кк][Аа] [\d.]+\*\*'
+    eng_pattern = r'\*\*Full support for [\d.]+\*\*'
+    
+    new_content = re.sub(ukr_pattern,
+                         lambda m: f"**Повна підтримка {hos_version}**",
+                         content)
+    new_content = re.sub(eng_pattern,
+                         lambda m: f"**Full support for {hos_version}**",
+                         new_content, flags=re.IGNORECASE)
+    
+    if new_content != content:
+        with open(changelog_path, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+        print(f"[HOS] Synced HOS version to {hos_version} in changelog.")
 
 # =====================================================================
 # Asset processors
@@ -358,7 +469,7 @@ _ACTIONS = {
 }
 
 
-def process_tool(tool_config, env_vars):
+def process_tool(tool_config, env_vars, hos_version=None):
     """Download and process all assets for a single tool configuration."""
     tool_id = tool_config["id"]
     repo = tool_config["repo"]
@@ -423,17 +534,27 @@ def process_tool(tool_config, env_vars):
         # Update changelog
         kefir_ver = get_kefir_version(env_vars["kefir_root_dir"])
         if kefir_ver and kefir_ver != "UNKNOWN":
-            body = data.get("body", "")
+            release_name = data.get("name", "") or ""
+            body = data.get("body", "") or ""
+            
+            # If body is empty, try to fetch the tag message (like in sys-patch)
+            if not body.strip():
+                tag_msg = fetch_tag_message(repo, tag)
+                if tag_msg:
+                    body = tag_msg
+
+            # Combine name + body so release title is included
+            release_text = f"{release_name}\n\n{body}".strip()
             release_url = data.get("html_url", f"https://github.com/{repo}/releases/tag/{tag}")
             print(f"[{tool_id}] Generating summary via OpenAI...")
-            ukr_sum, eng_sum = summarize_with_openai(body)
+            ukr_sum, eng_sum = summarize_with_openai(release_text, tool_id)
             changelog_path = os.path.join(env_vars["kefir_root_dir"], "changelog")
             
             tool_name_map = {"HEKATE": "Hekate"}
             display_name = tool_name_map.get(tool_id, tool_id.replace("_", " ").title())
             update_changelog_file(
                 changelog_path, tool_id, display_name, tag, release_url,
-                ukr_sum, eng_sum, kefir_ver
+                ukr_sum, eng_sum, kefir_ver, hos_version
             )
 
         # Save version to state manager
@@ -456,14 +577,16 @@ def main():
 
     kef_8gb_dir = os.path.join(kefir_root_dir, "kefir", "config", "8gb")
 
-    env_vars = {
-        "kefir_root_dir": kefir_root_dir,
-        "kef_8gb_dir": kef_8gb_dir,
-    }
-
     # -- HOS checks --
     atmosphere_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "Atmosphere")
     current_hos = get_current_hos_version(atmosphere_dir)
+
+    env_vars = {
+        "kefir_root_dir": kefir_root_dir,
+        "kef_8gb_dir": kef_8gb_dir,
+        # hos_version for changelog headers taken ONLY from .env (manual control)
+        "hos_version": get_env_var("HOS_VERSION"),
+    }
     cached_hos = state.get("HOS_VERSION")
     
     hos_bumped = False
@@ -478,9 +601,13 @@ def main():
 
     mc_updated = False
 
+    hos_version = env_vars.get("hos_version")
+    changelog_path = os.path.join(kefir_root_dir, "changelog")
+    sync_hos_in_changelog(changelog_path, hos_version)
+    
     tools_config = load_tools_config()
     for tool in tools_config:
-        ok, downloaded = process_tool(tool, env_vars)
+        ok, downloaded = process_tool(tool, env_vars, hos_version)
         if tool["id"] == "MISSIONCONTROL" and downloaded:
             mc_updated = True
 

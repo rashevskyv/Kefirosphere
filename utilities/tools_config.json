@@ -102,5 +102,18 @@
                 ]
             }
         ]
+    },
+    {
+        "id": "SYS_PATCH",
+        "repo": "impeeza/sys-patch",
+        "rules": [
+            {
+                "match": "sys-patch-v*.zip",
+                "action": "extract_zip",
+                "extract": [
+                    {"member": "*", "dest": "{kefir_root_dir}/kefir/{member}"}
+                ]
+            }
+        ]
     }
 ]

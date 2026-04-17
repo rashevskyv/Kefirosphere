@@ -2,6 +2,7 @@ import os
 import sys
 import datetime
 import random
+import shutil
 from PIL import Image, ImageDraw, ImageFont
 
 def draw_rotated_text(img, text, font, landscape_x, landscape_y, fill=(0, 0, 0, 255), offset=(0,0), scale_x=1.0, scale_y=1.0, pixel_scale=1, resampling=Image.Resampling.NEAREST, anti_aliasing=False):
@@ -160,6 +161,7 @@ def get_season(month):
 
 BOOTLOGO_DIR = r"D:\git\dev\_kefir\bootlogo\blank"
 OUT_DIR = r"D:\git\dev\_kefir\bootlogo\temp"
+DEBUG_GENERATE_Z1 = True  # Always generate update logo for now (forces copy)
 
 # ==========================================
 # TEXT CONFIGURATION
@@ -172,7 +174,7 @@ TEXT_OFFSET_X = 0
 TEXT_OFFSET_Y = 0
 
 # Vertical text scale (1.0 = normal, 1.5 = 50% stretched upwards)
-TEXT_SCALE_Y = 1.5
+TEXT_SCALE_Y = 1.6
 
 # Horizontal text scale (1.0 = normal)
 TEXT_SCALE_X = 1.2
@@ -286,9 +288,6 @@ def build_covers():
         hos_formatted = hos_ver_raw
         
     # Generate Image 1 (only if season changed or debug is true)
-    DEBUG_GENERATE_Z1 = True
-    
-    # Generate Image 1 (only if season changed or debug is true)
     if DEBUG_GENERATE_Z1 or last_season != current_season:
         z1 = bg.copy()
         
@@ -333,6 +332,25 @@ def build_covers():
     z4_out = os.path.join(OUT_DIR, "Z4_final.png")
     z4_rotated.save(z4_out, "PNG")
     print(f"Generated {z4_out}")
+
+    # ==========================================
+    # DEPLOY TO FINAL LOCATIONS
+    # ==========================================
+    deploy_map = {
+        "Z1_update.bmp": r"D:\git\dev\_kefir\kefir\bootloader\updating.bmp",
+        "Z2_regular.bmp": r"D:\git\dev\_kefir\kefir\bootloader\bootlogo_kefir.bmp",
+        "Z3_8gb.bmp": r"D:\git\dev\_kefir\kefir\config\8gb\bootloader\bootlogo_kefir.bmp",
+        "Z4_final.png": r"D:\git\dev\_kefir\kefir.png"
+    }
+
+    for src_name, dst_path in deploy_map.items():
+        src_path = os.path.join(OUT_DIR, src_name)
+        if os.path.exists(src_path):
+            dst_dir = os.path.dirname(dst_path)
+            if not os.path.exists(dst_dir):
+                os.makedirs(dst_dir, exist_ok=True)
+            shutil.copy2(src_path, dst_path)
+            print(f"Deployed: {src_name} -> {dst_path}")
 
     # Save new state
     state.set("LAST_RELEASE_DATE", now.strftime("%Y-%m-%d %H:%M:%S"))
