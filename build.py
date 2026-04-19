@@ -395,6 +395,10 @@ def run_make(cmd, *, cwd=None, progress: BuildProgress = None):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_env():
+    # Automatically define KEFIROSPHERE_DIR exactly like build.sh does
+    if "KEFIROSPHERE_DIR" not in os.environ:
+        os.environ["KEFIROSPHERE_DIR"] = str(SCRIPT_DIR)
+
     # Load .env locally if run directly
     env_file = SCRIPT_DIR / ".env"
     if env_file.exists():
@@ -402,7 +406,12 @@ def load_env():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 key, val = line.split("=", 1)
-                os.environ.setdefault(key.strip(), val.strip().strip("\"'"))
+                val = val.strip().strip("\"'")
+                if sys.platform == "win32" and val.startswith("/mnt/"):
+                    parts = val.split("/")
+                    if len(parts) >= 3:
+                        val = parts[2].upper() + ":" + "\\" + "\\".join(parts[3:])
+                os.environ.setdefault(key.strip(), os.path.normpath(val))
 
     return {
         "KEFIR_ROOT_DIR":   env_require("KEFIR_ROOT_DIR"),

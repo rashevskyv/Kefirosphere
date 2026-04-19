@@ -37,7 +37,12 @@ def load_env():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 key, val = line.split("=", 1)
-                os.environ.setdefault(key.strip(), val.strip().strip("\"'"))
+                val = val.strip().strip("\"'")
+                if sys.platform == "win32" and val.startswith("/mnt/"):
+                    parts = val.split("/")
+                    if len(parts) >= 3:
+                        val = parts[2].upper() + ":" + "\\" + "\\".join(parts[3:])
+                os.environ.setdefault(key.strip(), os.path.normpath(val))
     
     kefir_root = os.environ.get("KEFIR_ROOT_DIR")
     if not kefir_root:
@@ -46,7 +51,7 @@ def load_env():
     return kefir_root
 
 def bump_version(kefir_root: str) -> int:
-    """Increment version file and commit changes. Returns new version."""
+    """Increment version file. Returns new version."""
     version_file = Path(kefir_root) / "version"
     try:
         current = int(version_file.read_text().strip())
@@ -55,23 +60,6 @@ def bump_version(kefir_root: str) -> int:
     new_ver = current + 1
     version_file.write_text(str(new_ver))
     log.info("Version bumped: %d -> %d", current, new_ver)
-
-    # Commit kefir_root branch
-    try:
-        git("add", "version", cwd=kefir_root)
-        git("commit", "-m", f"build: bump version to {new_ver}", cwd=kefir_root)
-        log.info("Kefir root version committed: %d", new_ver)
-    except subprocess.CalledProcessError as e:
-        log.warning("Could not commit Kefir root directory:\n%s", e.stdout)
-
-    # Commit Kefirosphere
-    try:
-        git("add", "-A", cwd=SCRIPT_DIR)
-        git("commit", "-m", f"build: bump version to {new_ver}", cwd=SCRIPT_DIR)
-        log.info("Kefirosphere committed: build %d", new_ver)
-    except subprocess.CalledProcessError as e:
-        log.warning("Could not commit Kefirosphere:\n%s", e.stdout)
-
     return new_ver
 
 def main():

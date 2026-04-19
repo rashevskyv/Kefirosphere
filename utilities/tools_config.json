@@ -74,7 +74,7 @@
                 "match": "sys-con-*.zip",
                 "action": "extract_zip",
                 "extract": [
-                    {"member": "*", "dest": "{kefir_root_dir}/kefir/{member}"}
+                    {"member": "*", "exclude": ["*sys-con.nro"], "dest": "{kefir_root_dir}/kefir/{member}"}
                 ]
             }
         ]

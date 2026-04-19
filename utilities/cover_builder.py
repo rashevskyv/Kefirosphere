@@ -5,6 +5,9 @@ import random
 import shutil
 from PIL import Image, ImageDraw, ImageFont
 
+# Add utilities path for shared helpers
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 def draw_rotated_text(img, text, font, landscape_x, landscape_y, fill=(0, 0, 0, 255), offset=(0,0), scale_x=1.0, scale_y=1.0, pixel_scale=1, resampling=Image.Resampling.NEAREST, anti_aliasing=False):
     # Get bounding box of text
     bbox = font.getbbox(text)
@@ -48,9 +51,8 @@ def draw_rotated_text(img, text, font, landscape_x, landscape_y, fill=(0, 0, 0, 
     color_layer = Image.new('RGBA', txt_rot.size, fill)
     img.paste(color_layer, (portrait_x, portrait_y), txt_rot)
 
-# Add utilities path to import state manager
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from state_manager import state
+from fetch_tools import get_env_var
 
 def draw_hos_composite(img, version_text, landscape_x, landscape_y):
     digits_dir = os.path.join(BOOTLOGO_DIR, "digits")
@@ -159,8 +161,9 @@ def get_season(month):
     elif month in (9, 10, 11): return "autumn"
     else: return "winter"
 
-BOOTLOGO_DIR = r"D:\git\dev\_kefir\bootlogo\blank"
-OUT_DIR = r"D:\git\dev\_kefir\bootlogo\temp"
+_kefir_root = get_env_var("KEFIR_ROOT_DIR") or r"D:\git\dev\_kefir"
+BOOTLOGO_DIR = os.path.join(_kefir_root, "bootlogo", "blank")
+OUT_DIR = os.path.join(_kefir_root, "bootlogo", "temp")
 DEBUG_GENERATE_Z1 = True  # Always generate update logo for now (forces copy)
 
 # ==========================================
@@ -246,9 +249,9 @@ def build_covers():
         except Exception:
             pass
             
-    # Read KEF_VERSION 
+    # Read KEF_VERSION
     kef_version = "Unknown"
-    version_file = r"D:\git\dev\_kefir\version"
+    version_file = os.path.join(_kefir_root, "version")
     if os.path.exists(version_file):
         with open(version_file, "r", encoding="utf-8") as f:
             kef_version = f.read().strip()
@@ -274,7 +277,7 @@ def build_covers():
     if RELEASES_ROTATION != 0:
         releases_dec = releases_dec.rotate(RELEASES_ROTATION, expand=True)
     
-    font_path = r"D:\git\dev\_kefir\bootlogo\fonts\dotmat.ttf"
+    font_path = os.path.join(_kefir_root, "bootlogo", "fonts", "dotmat.ttf")
     # Load font smaller according to pixelation scale
     font = ImageFont.truetype(font_path, max(1, FONT_SIZE // TEXT_PIXELATION_SCALE))
     
@@ -337,10 +340,10 @@ def build_covers():
     # DEPLOY TO FINAL LOCATIONS
     # ==========================================
     deploy_map = {
-        "Z1_update.bmp": r"D:\git\dev\_kefir\kefir\bootloader\updating.bmp",
-        "Z2_regular.bmp": r"D:\git\dev\_kefir\kefir\bootloader\bootlogo_kefir.bmp",
-        "Z3_8gb.bmp": r"D:\git\dev\_kefir\kefir\config\8gb\bootloader\bootlogo_kefir.bmp",
-        "Z4_final.png": r"D:\git\dev\_kefir\kefir.png"
+        "Z1_update.bmp": os.path.join(_kefir_root, "kefir", "bootloader", "updating.bmp"),
+        "Z2_regular.bmp": os.path.join(_kefir_root, "kefir", "bootloader", "bootlogo_kefir.bmp"),
+        "Z3_8gb.bmp": os.path.join(_kefir_root, "kefir", "config", "8gb", "bootloader", "bootlogo_kefir.bmp"),
+        "Z4_final.png": os.path.join(_kefir_root, "kefir.png"),
     }
 
     for src_name, dst_path in deploy_map.items():

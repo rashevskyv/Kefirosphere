@@ -8,6 +8,42 @@ try:
 except ImportError:
     msvcrt = None
 
+def get_key():
+    if msvcrt is not None:
+        key = msvcrt.getch()
+        if key in (b'\xe0', b'\x00'):
+            c2 = msvcrt.getch()
+            if c2 == b'H': return 'UP'
+            if c2 == b'P': return 'DOWN'
+            return None
+        if key == b' ': return 'SPACE'
+        if key == b'\r': return 'ENTER'
+        if key == b'\x08': return 'BACKSPACE'
+        if key == b'\x03': return 'CTRL_C'
+        if key.isdigit() and key != b'0':
+            return key.decode()
+        return None
+    else:
+        import tty, termios
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            ch = sys.stdin.read(1)
+            if ch == '\x1b':
+                c2 = sys.stdin.read(2)
+                if c2 == '[A': return 'UP'
+                if c2 == '[B': return 'DOWN'
+                return None
+            if ch == ' ': return 'SPACE'
+            if ch in ('\r', '\n'): return 'ENTER'
+            if ch in ('\x08', '\x7f'): return 'BACKSPACE'
+            if ch == '\x03': return 'CTRL_C'
+            if ch.isdigit() and ch != '0': return ch
+            return None
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
 def main():
     # Detect the root directory where the script is located
     root_dir = Path(__file__).resolve().parent
@@ -66,31 +102,23 @@ def main():
         print("Press ENTER to confirm and proceed.")
         print("Press Ctrl+C to abort.")
 
-        if msvcrt is None:
-            # Fallback for non-Windows
-            print("Error: msvcrt not available. This interactive menu requires Windows.")
-            sys.exit(1)
-            
         try:
-            key = msvcrt.getch()
+            key = get_key()
         except KeyboardInterrupt:
             print("\nAborted.")
             sys.exit(0)
             
-        if key in (b'\xe0', b'\x00'): # special keys like arrows
-            key = msvcrt.getch()
-            if key == b'H': # UP
-                current_pos = max(0, current_pos - 1)
-            elif key == b'P': # DOWN
-                current_pos = min(len(script_files) - 1, current_pos + 1)
-        elif key == b' ': # Space
+        if key == 'UP':
+            current_pos = max(0, current_pos - 1)
+        elif key == 'DOWN':
+            current_pos = min(len(script_files) - 1, current_pos + 1)
+        elif key == 'SPACE':
             if current_pos not in selected_order:
                 next_num = max(selected_order.values()) + 1 if selected_order else 1
                 selected_order[current_pos] = next_num
-                current_pos = min(len(script_files) - 1, current_pos + 1)
             else:
                 del selected_order[current_pos]
-        elif key == b'\r': # Enter
+        elif key == 'ENTER':
             if not selected_order:
                 # If nothing selected, just exit
                 os.system('cls' if os.name == 'nt' else 'clear')
@@ -99,18 +127,17 @@ def main():
             else:
                 os.system('cls' if os.name == 'nt' else 'clear')
                 break
-        elif key == b'\x08': # Backspace
+        elif key == 'BACKSPACE':
             if current_pos in selected_order:
                 del selected_order[current_pos]
-        elif key.isdigit() and key != b'0': # 1-9
-            num = int(key.decode())
+        elif key and key.isdigit():
+            num = int(key)
             # Remove this number from any other selected script
             for k, v in list(selected_order.items()):
                 if v == num:
                     del selected_order[k]
             selected_order[current_pos] = num
-            current_pos = min(len(script_files) - 1, current_pos + 1)
-        elif key == b'\x03': # Ctrl+C
+        elif key == 'CTRL_C':
             print("\nAborted.")
             sys.exit(0)
 
