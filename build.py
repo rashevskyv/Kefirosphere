@@ -5,8 +5,7 @@ Kefirosphere Build Script
 1. Applies core patches to Atmosphere (current branch).
 2. Creates variant branches (8gb_DRAM, oc, 40mb) and applies their patches.
 3. Runs `make kefir` (full build pipeline).
-4. On success: bumps version file and commits Kefirosphere.
-5. Always restores Atmosphere to the original state.
+4. Always restores Atmosphere to the original state.
 
 Run via build.sh (which sources .env).
 """
@@ -426,35 +425,6 @@ def read_version(kefir_root: str) -> int:
         return 0
 
 
-def bump_version(kefir_root: str) -> int:
-    """Increment version file and commit changes. Returns new version."""
-    version_file = Path(kefir_root) / "version"
-    try:
-        current = int(version_file.read_text().strip())
-    except Exception:
-        current = 0
-    new_ver = current + 1
-    version_file.write_text(str(new_ver))
-    log.info("Version bumped: %d → %d", current, new_ver)
-
-    # Commit kefir_root branch
-    try:
-        git("add", "version", cwd=kefir_root)
-        git("commit", "-m", f"build: bump version to {new_ver}", cwd=kefir_root)
-        log.info("Kefir root version committed: %d", new_ver)
-    except subprocess.CalledProcessError as e:
-        log.warning("Could not commit Kefir root directory:\n%s", e.stdout)
-
-    # Commit Kefirosphere
-    try:
-        git("add", "-A", cwd=SCRIPT_DIR)
-        git("commit", "-m", f"build: bump version to {new_ver}", cwd=SCRIPT_DIR)
-        log.info("Kefirosphere committed: build %d", new_ver)
-    except subprocess.CalledProcessError as e:
-        log.warning("Could not commit Kefirosphere:\n%s", e.stdout)
-
-    return new_ver
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Pre-flight
@@ -771,9 +741,6 @@ def build(env, patches_to_apply, adv_flag):
     finally:
         prog.stop(success)
         _log_on()
-        if success:
-            new_ver = bump_version(env["KEFIR_ROOT_DIR"])
-            log.info("Version after build: %d", new_ver)
         cleanup(orig_branch, orig_head)
 
 

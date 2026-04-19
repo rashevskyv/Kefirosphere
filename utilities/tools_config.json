@@ -22,7 +22,7 @@
     },
     {
         "id": "OVL_SYSMODULES",
-        "repo": "WerWolv/ovl-sysmodules",
+        "repo": "ppkantorski/ovl-sysmodules",
         "rules": [
             {
                 "match": "ovlSysmodules.ovl",
@@ -105,7 +105,7 @@
     },
     {
         "id": "SYS_PATCH",
-        "repo": "impeeza/sys-patch",
+        "repo": "borntohonk/sys-patch",
         "rules": [
             {
                 "match": "sys-patch-v*.zip",
