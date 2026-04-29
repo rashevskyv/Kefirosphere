@@ -17,6 +17,7 @@ import fnmatch
 import re
 import urllib.request
 import urllib.error
+import subprocess
 from datetime import datetime
 
 # Load state manager
@@ -634,6 +635,82 @@ _POST_HOOKS = {
 }
 
 # =====================================================================
+# Mission Control Custom Build
+# =====================================================================
+
+def build_mission_control_custom(tool_id, tag, env_vars):
+    """Clone, patch, build, and distribute MissionControl."""
+    build_dir = get_env_var("MISSION_CONTROL_BUILD_DIR")
+    patch_path = get_env_var("MISSION_CONTROL_PATCH_PATH")
+    kefir_root = get_env_var("KEFIR_ROOT_DIR")
+    
+    if not all([build_dir, patch_path, kefir_root]):
+        print(f"[{tool_id}] ERROR: Missing MC build config in .env (BUILD_DIR, PATCH_PATH, or KEFIR_ROOT_DIR)", file=sys.stderr)
+        return False
+
+    repo_url = "https://github.com/ndeadly/MissionControl.git"
+    
+    # We need to run these in WSL
+    # Convert windows paths to wsl paths for the commands
+    try:
+        def to_wsl(win_path):
+             # Simple conversion for C: or D: drives
+             p = win_path.replace('\\', '/')
+             if len(p) > 1 and p[1] == ':':
+                 drive = p[0].lower()
+                 return f"/mnt/{drive}/{p[3:]}"
+             return p
+
+        # If they are already /mnt/ paths from .env, use them as is
+        wsl_build_dir = build_dir if build_dir.startswith('/') else to_wsl(build_dir)
+        wsl_patch_path = patch_path if patch_path.startswith('/') else to_wsl(patch_path)
+        wsl_kefir_root = kefir_root if kefir_root.startswith('/') else to_wsl(kefir_root)
+
+        print(f"[{tool_id}] Preparing custom build in {wsl_build_dir}...")
+        
+        # Build a single bash command string to ensure context persistence (cd etc)
+        # 1. Clean old build
+        # 2. Clone specific tag with submodules
+        # 3. Apply patch
+        # 4. Build
+        # 5. Distribute
+        bash_cmds = [
+            f"rm -rf \"{wsl_build_dir}\"",
+            f"echo \"[{tool_id}] Cloning repository...\"",
+            f"git clone --depth 1 --recurse-submodules --shallow-submodules -b \"{tag}\" \"{repo_url}\" \"{wsl_build_dir}\" > /dev/null 2>&1",
+            f"cd \"{wsl_build_dir}\"",
+            f"echo \"[{tool_id}] Applying patch: {os.path.basename(wsl_patch_path)}\"",
+            f"git apply --verbose --ignore-whitespace \"{wsl_patch_path}\"",
+            f"echo \"[{tool_id}] Files modified by patch:\"",
+            f"git status --porcelain",
+            f"echo \"[{tool_id}] Starting build (using all cores)...\"",
+            f"make dist -j$(nproc)",
+            f"echo \"[{tool_id}] Distributing files...\"",
+            f"rsync -av \"dist/atmosphere/\" \"{wsl_kefir_root}/atmosphere/\" > /dev/null",
+            f"rsync -av \"dist/config/\" \"{wsl_kefir_root}/config/\" > /dev/null"
+        ]
+        
+        full_bash = " && ".join(bash_cmds)
+        
+        if os.name == 'nt':
+            cmd = ["wsl", "bash", "-c", full_bash]
+            print(f"[{tool_id}] Executing build pipeline via WSL...")
+        else:
+            cmd = ["bash", "-c", full_bash]
+            print(f"[{tool_id}] Executing build pipeline (Direct Bash)...")
+        
+        subprocess.run(cmd, check=True)
+        print(f"[{tool_id}] Custom build and distribution successful.")
+        return True
+        
+    except subprocess.CalledProcessError as e:
+        print(f"[{tool_id}] ERROR: Build pipeline failed.", file=sys.stderr)
+        return False
+    except Exception as e:
+        print(f"[{tool_id}] ERROR: Unexpected error during build: {e}", file=sys.stderr)
+        return False
+
+# =====================================================================
 # Tool processing
 # =====================================================================
 
@@ -674,26 +751,29 @@ def process_tool(tool_config, env_vars, hos_version=None):
 
         # Match assets against rules and process
         ok = True
-        for asset in data.get("assets", []):
-            name = asset["name"]
-            matched = None
-            for rule in rules:
-                if fnmatch.fnmatch(name, rule["match"]):
-                    if "exclude" in rule and fnmatch.fnmatch(name, rule["exclude"]):
-                        continue
-                    matched = rule
-                    break
-            if not matched:
-                continue
+        if tool_id == "MISSIONCONTROL":
+            ok = build_mission_control_custom(tool_id, tag, env_vars)
+        else:
+            for asset in data.get("assets", []):
+                name = asset["name"]
+                matched = None
+                for rule in rules:
+                    if fnmatch.fnmatch(name, rule["match"]):
+                        if "exclude" in rule and fnmatch.fnmatch(name, rule["exclude"]):
+                            continue
+                        matched = rule
+                        break
+                if not matched:
+                    continue
 
-            print(f"[{tool_id}] Processing {name}...")
-            handler = _ACTIONS.get(matched["action"])
-            if handler:
-                if not handler(asset, matched, env_vars):
+                print(f"[{tool_id}] Processing {name}...")
+                handler = _ACTIONS.get(matched["action"])
+                if handler:
+                    if not handler(asset, matched, env_vars):
+                        ok = False
+                else:
+                    print(f"[{tool_id}] Unknown action: {matched['action']}", file=sys.stderr)
                     ok = False
-            else:
-                print(f"[{tool_id}] Unknown action: {matched['action']}", file=sys.stderr)
-                ok = False
 
         if not ok:
             if ask_user(f"[{tool_id}] Download errors occurred. Retry? ('n' to keep as-is)"):

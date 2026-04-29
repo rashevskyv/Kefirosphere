@@ -22,6 +22,7 @@ SCRIPT_DIR    = Path(__file__).resolve().parent
 ATMOSPHERE_DIR = (SCRIPT_DIR / ".." / "Atmosphere").resolve()
 PATCHES_DIR   = SCRIPT_DIR / "patches"
 LOG_FILE      = SCRIPT_DIR / "build.log"
+STATE_FILE    = SCRIPT_DIR / "utilities" / "build_state.json"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ANSI helpers
@@ -320,8 +321,9 @@ def git(*args, cwd=None, check=True):
     return run(["git"] + list(args), cwd=cwd, check=check)
 
 
-def git_out(*args, cwd=None):
-    return run_capture(["git"] + list(args), cwd=cwd)
+def git_out(*args, cwd=None, check=True):
+    res = run(["git"] + list(args), cwd=cwd, check=check)
+    return res.stdout.strip()
 
 
 def env_require(name):
@@ -439,18 +441,157 @@ def read_version(kefir_root: str) -> int:
 # Pre-flight
 # ─────────────────────────────────────────────────────────────────────────────
 
+def load_original_state():
+    """Load original Atmosphere state from build_state.json (if exists)."""
+    if STATE_FILE.exists():
+        try:
+            import json
+            state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            branch = state.get("ATMOSPHERE_ORIGINAL_BRANCH")
+            head = state.get("ATMOSPHERE_ORIGINAL_HEAD")
+            if branch and head:
+                log.info("Loaded original state from file: branch=%s, HEAD=%s", branch, head[:8])
+                return branch, head
+        except Exception as e:
+            log.warning("Could not load state file: %s", e)
+    return None, None
+
+
+def save_original_state(branch: str, head: str):
+    """Save original Atmosphere state to build_state.json (merge with existing data)."""
+    import json
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    # Load existing state
+    state = {}
+    if STATE_FILE.exists():
+        try:
+            state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    # Update with git state
+    state["ATMOSPHERE_ORIGINAL_BRANCH"] = branch
+    state["ATMOSPHERE_ORIGINAL_HEAD"] = head
+
+    STATE_FILE.write_text(json.dumps(state, indent=4), encoding="utf-8")
+    log.info("Saved original state to file: branch=%s, HEAD=%s", branch, head[:8])
+
+
+def clear_original_state():
+    """Remove git state from build_state.json (keep other data)."""
+    if STATE_FILE.exists():
+        try:
+            import json
+            state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            # Remove only git-related keys
+            state.pop("ATMOSPHERE_ORIGINAL_BRANCH", None)
+            state.pop("ATMOSPHERE_ORIGINAL_HEAD", None)
+            STATE_FILE.write_text(json.dumps(state, indent=4), encoding="utf-8")
+            log.info("Cleared git state from build_state.json")
+        except Exception as e:
+            log.warning("Could not clear git state: %s", e)
+
+
 def reset_atmosphere():
+    """Reset Atmosphere to clean state and remove any leftover variant branches.
+
+    Returns the original HEAD commit before any reset (for later restoration).
+    Uses saved state file if available, otherwise detects clean upstream state.
+    """
+    # Try to load previously saved original state
+    saved_branch, saved_head = load_original_state()
+
+    # Save current state BEFORE any modifications (if not already saved)
+    if not saved_head:
+        try:
+            orig_branch = git_out("branch", "--show-current")
+            orig_head = git_out("rev-parse", "HEAD")
+        except subprocess.CalledProcessError:
+            # Fallback if commands fail
+            orig_branch = "master"
+            orig_head = None
+    else:
+        orig_branch = saved_branch
+        orig_head = saved_head
+
+    # Check for leftover variant branches from interrupted builds
+    branches_output = git_out("branch", "--list")
+    leftover_branches = [b for b in VARIANT_BRANCHES if b in branches_output]
+
+    if leftover_branches:
+        log.warning("Found leftover variant branches from previous interrupted build: %s", leftover_branches)
+        current_branch = git_out("branch", "--show-current")
+
+        # If we're on a variant branch, switch to master first
+        if current_branch in VARIANT_BRANCHES:
+            log.info("Currently on variant branch '%s' — switching to master", current_branch)
+            git("checkout", "master", check=False)
+
+        # Delete leftover branches
+        for branch in leftover_branches:
+            log.info("Deleting leftover branch: %s", branch)
+            git("branch", "-D", branch, check=False)
+
+    # Check for uncommitted changes or applied patches
     res = run(["git", "status", "--porcelain"], cwd=ATMOSPHERE_DIR, check=False)
     if res.stdout.strip():
-        log.info("Atmosphere has local changes — resetting…")
+        log.warning("Atmosphere has local changes (possibly from interrupted build) — resetting…")
         git("reset", "--hard", "HEAD")
         git("clean", "-fd", check=False)
-        log.info("Atmosphere reset — OK")
-    else:
-        log.info("Atmosphere is clean — OK")
+
+    # Check if HEAD has Kefir patches (commits with "KEFIR:" in message)
+    # Only do this if we don't have a saved state
+    if not saved_head:
+        try:
+            recent_commits = git_out("log", "--oneline", "-10")
+            if "KEFIR:" in recent_commits:
+                log.warning("Found Kefir patches in commit history — finding original upstream HEAD")
+                # Find first commit that's NOT a Kefir patch
+                commits = git_out("log", "--oneline", "-100").split("\n")
+                for commit_line in commits:
+                    commit_hash = commit_line.split()[0]
+                    commit_msg = git_out("log", "-1", "--format=%s", commit_hash)
+                    if "KEFIR:" not in commit_msg:
+                        log.info("Found original upstream commit: %s", commit_line[:60])
+                        git("reset", "--hard", commit_hash)
+                        git("clean", "-fd", check=False)
+                        # Update orig_head to this clean state
+                        orig_head = commit_hash
+                        log.info("Reset to clean upstream state")
+                        break
+        except subprocess.CalledProcessError as e:
+            log.warning("Could not check for Kefir patches: %s", e)
+
+    if not orig_head:
+        orig_head = git_out("rev-parse", "HEAD")
+
+    # Pull latest changes from upstream (after ensuring we're on clean state)
+    log.info("Pulling latest changes from upstream...")
+    try:
+        result = git("pull", "--ff-only", check=False)
+        if result.returncode == 0:
+            log.info("Atmosphere updated to latest upstream")
+            # Update HEAD after pull
+            new_head = git_out("rev-parse", "HEAD")
+            if new_head != orig_head:
+                log.info("HEAD changed after pull: %s -> %s", orig_head[:8], new_head[:8])
+                orig_head = new_head
+        else:
+            log.warning("git pull failed, continuing with current HEAD")
+    except subprocess.CalledProcessError as e:
+        log.warning("Could not pull updates: %s", e)
+
+    # Save the original clean state for future interrupted builds
+    if not saved_head:
+        save_original_state(orig_branch, orig_head)
+
+    log.info("Atmosphere is clean — OK")
+    return orig_branch, orig_head
 
 
 def save_state():
+    """Save current git state (called after reset_atmosphere cleans the repo)."""
     branch = git_out("branch", "--show-current")
     head   = git_out("rev-parse", "HEAD")
     log.info("State saved — branch: %s  HEAD: %s", branch, head)
@@ -547,19 +688,35 @@ VARIANT_BRANCHES = ["8gb_DRAM", "oc", "40mb"]
 
 
 def cleanup(orig_branch, orig_head):
+    """Restore Atmosphere to original state and remove variant branches."""
     log.info("=== Cleanup: restoring Atmosphere ===")
-    git("checkout", orig_branch, check=False)
+
+    # Get current branch to avoid errors if already on target
+    current_branch = git_out("branch", "--show-current", check=False)
+
+    # Only checkout if we're not already on the original branch
+    if current_branch != orig_branch:
+        git("checkout", orig_branch, check=False)
+
     try:
         git("reset", "--hard", orig_head)
     except subprocess.CalledProcessError as e:
         log.error("git reset failed:\n%s", e.stdout)
+
     try:
         git("clean", "-fd")
     except subprocess.CalledProcessError as e:
         log.warning("git clean failed:\n%s", e.stdout)
+
+    # Delete variant branches (check if they exist first)
+    branches_output = git_out("branch", "--list", check=False)
     for branch in VARIANT_BRANCHES:
-        git("branch", "-D", branch, check=False)
-        log.info("Deleted branch: %s", branch)
+        if branch in branches_output:
+            git("branch", "-D", branch, check=False)
+            log.info("Deleted branch: %s", branch)
+        else:
+            log.debug("Branch %s doesn't exist, skipping", branch)
+
     log.info("=== Cleanup complete ===")
 
 
@@ -623,8 +780,8 @@ def build(env, patches_to_apply, adv_flag):
     # Use hardcoded estimation instead of slow source file counting
     total_files = _ESTIMATED_FILES
 
-    reset_atmosphere()
-    orig_branch, orig_head = save_state()
+    orig_branch, orig_head = reset_atmosphere()
+    # save_state() is no longer needed - reset_atmosphere() returns the original state
 
     # Count total patches for patch-phase progress
     patch_dirs = []
@@ -751,6 +908,8 @@ def build(env, patches_to_apply, adv_flag):
         prog.stop(success)
         _log_on()
         cleanup(orig_branch, orig_head)
+        # Clear state file after cleanup (successful or not)
+        clear_original_state()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

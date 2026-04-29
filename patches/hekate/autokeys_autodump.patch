@@ -1,0 +1,920 @@
+===============================================================================
+  AUTOKEYS / AUTODUMP — silent prod.keys refresh via hekate ↔ Lockpick_RCM
+===============================================================================
+
+Port of the 4IFIR auto-refresh mechanism for prod.keys. When HOS is updated on
+SysMMC or EmuMMC, hekate detects the change at boot and silently chainloads a
+Lockpick_RCM variant that dumps keys and returns control to hekate via
+bootloader/update.bin. No user interaction, no perceivable boot delay.
+
+Applies to:
+  * hekate fork (any recent CTCaer-based)
+  * Lockpick_RCM fork (shchmue-based)
+
+Design (split brain):
+  - hekate side does NO crypto. It only reads the 14-byte pkg1 timestamp +
+    1-byte master-key revision from BOOT0 (plaintext header — Mariko skips the
+    0x170-byte bl_hdr_t210b01_t prefix first, Erista starts at 0). Compares
+    against bootloader/sys/autokeys.bin. If stale, writes
+    bootloader/sys/autokeys.request and dispatches bootloader/sys/lockpick.bin.
+
+  - Lockpick side ships a silent dispatcher that runs before the main menu.
+    If the request marker exists, it calls a new dump_keys_silent() wrapper
+    (mutes gfx, skips btn_wait), then launches bootloader/update.bin to chain
+    back to hekate. Lockpick's normal UI still works when invoked manually.
+
+Tested: Mariko T210B01, HOS 20.x, shipped in 4IFIR 2026-04-19.
+Erista expected to work (Lockpick-side TSEC flow is unchanged), not on-device
+tested in this build.
+
+SD layout the mechanism uses:
+  bootloader/sys/autokeys.bin      — 36-byte state: magic 'AK4I', ts+mkey per NAND
+  bootloader/sys/autokeys.request  — 36-byte request: magic 'AKRQ', retry counter
+  bootloader/sys/autokeys.disable  — user opt-out marker (any content)
+  bootloader/sys/autokeys.force    — user debug marker, forces redump
+  bootloader/sys/autokeys.failed   — after 3 failed retries, stops re-triggering
+  bootloader/sys/autokeys.log      — diagnostic log (gated by AK_DEBUG_LOG=1)
+  bootloader/sys/lockpick.bin      — silent-aware Lockpick binary
+
+Safety rails:
+  - Pre-flight f_stat on lockpick.bin before writing the request (no-file → no-cycle)
+  - Retry counter capped at 3; Lockpick increments on entry, hekate gives up at cap
+  - hekate's _launch_payload had to lose its `static` qualifier (exposed for autokeys)
+  - Lockpick's _derive_keys is called as-is — no changes to the crypto path
+
+Payload size delta (example, Mariko T210B01):
+  hekate:    +1,556 B compressed   (120,358 / 126,296 limit)
+  Lockpick:  -577  B compressed    (109,787 / 126,296 limit — we saved by not
+                                     renaming title.keys)
+
+WARNING: the hekate patch removes `static` from _launch_payload so autokeys.c
+can invoke it. If your fork has a different main.c layout, just re-expose
+whatever payload-launch helper you already have.
+
+-------------------------------------------------------------------------------
+SECTION 1 of 3 — HEKATE repo  (Makefile + main.c + new bootloader/keys/*)
+-------------------------------------------------------------------------------
+
+warning: in the working copy of 'bootloader/keys/autokeys.c', LF will be replaced by CRLF the next time Git touches it
+diff --git a/Makefile b/Makefile
+index 3d6dafc3..6d1e822b 100755
+--- a/Makefile
++++ b/Makefile
+@@ -41,6 +41,9 @@ OBJS += bpmp ccplex clock di i2c irq timer \
+ # Utilities.
+ OBJS += btn dirlist ianos ini util config
+ 
++# 4IFIR autokeys detector (silent prod.keys refresh via Lockpick chainload).
++OBJS += autokeys
++
+ # OS loaders.
+ OBJS += l4t hos hos_config pkg1 pkg2 pkg3 pkg2_ini_kippatch secmon_exo
+ 
+diff --git a/bootloader/keys/autokeys.c b/bootloader/keys/autokeys.c
+new file mode 100644
+index 00000000..8c1bd7ab
+--- /dev/null
++++ b/bootloader/keys/autokeys.c
+@@ -0,0 +1,410 @@
++/*
++ * 4IFIR Autokeys — detector + chainload to silent Lockpick.
++ *
++ * Runs once per boot from ipl_main (after SD mount, before _auto_launch).
++ * Detects whether the HOS pkg1 on SysMMC or EmuMMC differs from what was
++ * dumped last time, and if so writes a request marker and jumps to
++ * bootloader/sys/lockpick.bin which performs the actual dump and then
++ * chainloads hekate back via bootloader/update.bin.
++ *
++ * Intentionally contains NO crypto — all key derivation lives in Lockpick.
++ *
++ * Copyright (c) 2026 4IFIR
++ * SPDX-License-Identifier: GPL-2.0-only
++ */
++
++#include <string.h>
++
++#include <bdk.h>
++
++#include "autokeys.h"
++#include "../config.h"
++#include "../hos/pkg1.h"
++#include "../storage/emummc.h"
++
++#include <libs/fatfs/ff.h>
++#include <mem/heap.h>
++#include <storage/emmc.h>
++#include <storage/sd.h>
++#include <storage/sdmmc.h>
++
++/* ---------- Constants ---------- */
++
++#define AK_STATE_MAGIC    0x49344B41u   /* 'AK4I' */
++#define AK_STATE_VER      2             /* v1 was dead-end in-hekate dumper; v2 is split-brain */
++
++#define AK_REQ_MAGIC      0x5152414Bu   /* 'AKRQ' */
++#define AK_REQ_VER        1
++
++#define AK_MAX_RETRY      3             /* Lockpick gets 3 chances before we mark .failed */
++
++/* Paths are SD-root relative. FatFs is built with FF_STR_VOLUME_ID=0 here,
++ * so any "sd:/" prefix would become part of the filename and silently fail. */
++#define AK_PATH_PRODKEYS  "switch/prod.keys"
++#define AK_PATH_STATE     "bootloader/sys/autokeys.bin"
++#define AK_PATH_REQUEST   "bootloader/sys/autokeys.request"
++#define AK_PATH_DISABLE   "bootloader/sys/autokeys.disable"
++#define AK_PATH_FORCE     "bootloader/sys/autokeys.force"
++#define AK_PATH_FAILED    "bootloader/sys/autokeys.failed"
++#define AK_PATH_LOCKPICK  "bootloader/sys/lockpick.bin"
++#define AK_PATH_LOG       "bootloader/sys/autokeys.log"
++
++/* Enable to emit a small per-boot diagnostic log at AK_PATH_LOG.
++ * Cost: ~500B code + 512B static buffer. Leave on until autodump is proven stable. */
++#define AK_DEBUG_LOG 1
++
++/* ---------- File layouts ---------- */
++
++typedef struct {
++	u32 magic;
++	u8  version;
++	u8  chip_t210b01;
++	u8  reserved[2];
++	u8  sys_timestamp[14];
++	u8  sys_mkey;
++	u8  sys_present;
++	u8  emu_timestamp[14];
++	u8  emu_mkey;
++	u8  emu_present;
++} __attribute__((packed)) ak_state_t;
++
++typedef struct {
++	u32 magic;
++	u8  version;
++	u8  retry;         /* 0..AK_MAX_RETRY; Lockpick increments on entry */
++	u8  target_mask;   /* bit0=sys, bit1=emu */
++	u8  reserved;
++	u8  sys_timestamp[14];
++	u8  sys_mkey;
++	u8  emu_timestamp[14];
++	u8  emu_mkey;
++} __attribute__((packed)) ak_request_t;
++
++typedef struct {
++	u8  timestamp[14];
++	u8  mkey;
++	u8  present;
++} ak_nand_info_t;
++
++/* Forward decl of hekate-internal payload launcher in bootloader/main.c.
++ * (static was removed there to expose this single call site.) */
++void _launch_payload(char *path, bool update, bool clear_screen);
++
++/* ---------- Optional diagnostic log ---------- */
++
++#ifdef AK_DEBUG_LOG
++static char ak_log_buf[512];
++static u32  ak_log_len = 0;
++
++static void _ak_log_str(const char *s)
++{
++	while (*s && ak_log_len < sizeof(ak_log_buf) - 1)
++		ak_log_buf[ak_log_len++] = *s++;
++	ak_log_buf[ak_log_len] = 0;
++}
++
++static void _ak_log_hex_u8(u8 v)
++{
++	if (ak_log_len + 2 >= sizeof(ak_log_buf) - 1) return;
++	static const char lut[] = "0123456789abcdef";
++	ak_log_buf[ak_log_len++] = lut[(v >> 4) & 0xF];
++	ak_log_buf[ak_log_len++] = lut[v & 0xF];
++	ak_log_buf[ak_log_len] = 0;
++}
++
++static void _ak_log_ts(const u8 *ts14)
++{
++	for (u32 i = 0; i < 14 && ak_log_len < sizeof(ak_log_buf) - 1; i++)
++		ak_log_buf[ak_log_len++] = ts14[i] ? ts14[i] : '0';
++	ak_log_buf[ak_log_len] = 0;
++}
++
++static void _ak_log_flush(void)
++{
++	if (ak_log_len == 0) return;
++	FIL fp;
++	f_mkdir("bootloader");
++	f_mkdir("bootloader/sys");
++	if (f_open(&fp, AK_PATH_LOG, FA_CREATE_ALWAYS | FA_WRITE)) return;
++	f_write(&fp, ak_log_buf, ak_log_len, NULL);
++	f_close(&fp);
++}
++
++#define AK_LOG(s)    _ak_log_str(s)
++#define AK_LOGX(v)   _ak_log_hex_u8((u8)(v))
++#define AK_LOGTS(t)  _ak_log_ts(t)
++#define AK_FLUSH()   _ak_log_flush()
++#else
++#define AK_LOG(s)    ((void)0)
++#define AK_LOGX(v)   ((void)0)
++#define AK_LOGTS(t)  ((void)0)
++#define AK_FLUSH()   ((void)0)
++#endif
++
++/* ---------- File helpers ---------- */
++
++static bool _ak_read_state(ak_state_t *out)
++{
++	FIL fp;
++	UINT br = 0;
++	if (f_open(&fp, AK_PATH_STATE, FA_READ | FA_OPEN_EXISTING))
++		return false;
++	FRESULT r = f_read(&fp, out, sizeof(*out), &br);
++	f_close(&fp);
++	if (r != FR_OK || br != sizeof(*out))
++		return false;
++	if (out->magic != AK_STATE_MAGIC || out->version != AK_STATE_VER)
++		return false;
++	return true;
++}
++
++static bool _ak_read_request(ak_request_t *out)
++{
++	FIL fp;
++	UINT br = 0;
++	if (f_open(&fp, AK_PATH_REQUEST, FA_READ | FA_OPEN_EXISTING))
++		return false;
++	FRESULT r = f_read(&fp, out, sizeof(*out), &br);
++	f_close(&fp);
++	if (r != FR_OK || br != sizeof(*out))
++		return false;
++	if (out->magic != AK_REQ_MAGIC || out->version != AK_REQ_VER)
++		return false;
++	return true;
++}
++
++static void _ak_write_request(const ak_request_t *req)
++{
++	FIL fp;
++	f_mkdir("bootloader");
++	f_mkdir("bootloader/sys");
++	if (f_open(&fp, AK_PATH_REQUEST, FA_CREATE_ALWAYS | FA_WRITE))
++		return;
++	f_write(&fp, req, sizeof(*req), NULL);
++	f_close(&fp);
++}
++
++static void _ak_mark_failed(void)
++{
++	FIL fp;
++	f_mkdir("bootloader");
++	f_mkdir("bootloader/sys");
++	if (f_open(&fp, AK_PATH_FAILED, FA_CREATE_ALWAYS | FA_WRITE))
++		return;
++	/* Content doesn't matter — presence is the signal. Write a tiny hint. */
++	static const char msg[] = "Lockpick autodump failed too many times. "
++	                          "Run Lockpick manually, then delete this file.\n";
++	f_write(&fp, msg, sizeof(msg) - 1, NULL);
++	f_close(&fp);
++}
++
++/* ---------- NAND probe ---------- */
++
++/* Reads pkg1 header from whatever NAND is currently routed by
++ * emu_cfg + h_cfg.emummc_force_disable. Fills info. Returns true if
++ * an identified or at least timestamp-readable pkg1 was found. */
++static bool _ak_probe_current_nand(ak_nand_info_t *info)
++{
++	memset(info, 0, sizeof(*info));
++
++	/* 1 sector (512B) is enough: bl_hdr_t210b01_t (0x170) + pk1_hdr_t (0x20) = 0x190. */
++	u8 *buf = (u8 *)malloc(EMMC_BLOCKSIZE);
++	if (!buf)
++		return false;
++
++	bool ok = false;
++
++	if (emummc_storage_set_mmc_partition(EMMC_BOOT0))
++		goto out;
++
++	/* PKG1_BOOTLOADER_MAIN_OFFSET is already a sector count (defined as bytes/EMMC_BLOCKSIZE). */
++	if (emummc_storage_read(PKG1_BOOTLOADER_MAIN_OFFSET, 1, buf))
++		goto out;
++
++	const u32 pk1_offset = h_cfg.t210b01 ? sizeof(bl_hdr_t210b01_t) : 0;
++	const pk1_hdr_t *hdr = (const pk1_hdr_t *)(buf + pk1_offset);
++
++	/* Raw header fields — plaintext, no decryption needed. */
++	memcpy(info->timestamp, hdr->timestamp, 14);
++	info->present = 1;
++
++	/* Try to resolve to a known pkg1 id for a clean mkey byte.
++	 * Unknown (future) timestamps still get recorded; Lockpick decides if it can handle them. */
++	const pkg1_id_t *id = pkg1_identify(buf + pk1_offset);
++	info->mkey = id ? (u8)id->mkey : hdr->keygen;
++
++	ok = true;
++
++out:
++	free(buf);
++	return ok;
++}
++
++/* ---------- Main entry ---------- */
++
++void autokeys_dump_if_needed(void)
++{
++	/* Mute gfx first: pkg1_identify() unconditionally gfx_printf's the timestamp
++	 * and we don't want that appearing in the framebuffer for a silent detector. */
++	bool saved_mute = gfx_con.mute;
++	gfx_con.mute = true;
++
++	AK_LOG("autokeys enter; t210b01="); AK_LOGX(h_cfg.t210b01 ? 1 : 0); AK_LOG("\n");
++
++	FILINFO fno;
++
++	/* Opt-out marker: cheapest possible check. */
++	if (!f_stat(AK_PATH_DISABLE, &fno)) {
++		AK_LOG("skip: disable marker\n");
++		goto done;
++	}
++
++	/* Pre-flight: if the silent Lockpick binary is missing, do nothing.
++	 * Writing a request without a handler would trap us in a dead cycle. */
++	if (f_stat(AK_PATH_LOCKPICK, &fno)) {
++		AK_LOG("skip: lockpick.bin missing at " AK_PATH_LOCKPICK "\n");
++		goto done;
++	}
++	AK_LOG("lockpick.bin found\n");
++
++	/* Retry budget: if a request from a previous boot already reached the cap,
++	 * mark failure and stop re-triggering until the user intervenes. */
++	ak_request_t prev_req = {0};
++	bool have_req = _ak_read_request(&prev_req);
++	u8 next_retry = 0;
++	AK_LOG("prev_req="); AK_LOGX(have_req ? 1 : 0);
++	if (have_req) { AK_LOG(" retry="); AK_LOGX(prev_req.retry); }
++	AK_LOG("\n");
++	if (have_req) {
++		if (prev_req.retry >= AK_MAX_RETRY) {
++			AK_LOG("give up: retry cap hit\n");
++			_ak_mark_failed();
++			f_unlink(AK_PATH_REQUEST);
++			goto done;
++		}
++		/* Lockpick increments retry on entry; we carry whatever it wrote. */
++		next_retry = prev_req.retry;
++	}
++
++	/* --------- Probe both NANDs. --------- */
++
++	emummc_load_cfg();
++	bool has_emu_cfg = (emu_cfg.enabled && (emu_cfg.sector || emu_cfg.path));
++
++	bool orig_force_disable = h_cfg.emummc_force_disable;
++	u32  orig_enabled       = emu_cfg.enabled;
++
++	ak_nand_info_t sys_info = {0};
++	ak_nand_info_t emu_info = {0};
++
++	/* SysMMC probe. */
++	AK_LOG("sys probe...\n");
++	h_cfg.emummc_force_disable = true;
++	emu_cfg.enabled = 0;
++	int sys_rc = emummc_storage_init_mmc();
++	AK_LOG("  sys init_rc="); AK_LOGX(sys_rc); AK_LOG("\n");
++	if (sys_rc == 0) {
++		_ak_probe_current_nand(&sys_info);
++		emmc_end();   /* physical eMMC only — leaves SD alone */
++	}
++	h_cfg.emummc_force_disable = orig_force_disable;
++	emu_cfg.enabled = orig_enabled;
++	AK_LOG("  sys present="); AK_LOGX(sys_info.present);
++	AK_LOG(" mkey="); AK_LOGX(sys_info.mkey);
++	AK_LOG(" ts="); AK_LOGTS(sys_info.timestamp); AK_LOG("\n");
++
++	/* EmuMMC probe (only if configured). */
++	if (has_emu_cfg) {
++		AK_LOG("emu probe...\n");
++		h_cfg.emummc_force_disable = false;
++		emu_cfg.enabled = 1;
++		int emu_rc = emummc_storage_init_mmc();
++		AK_LOG("  emu init_rc="); AK_LOGX(emu_rc); AK_LOG("\n");
++		if (emu_rc == 0) {
++			_ak_probe_current_nand(&emu_info);
++			emmc_end();
++		}
++		h_cfg.emummc_force_disable = orig_force_disable;
++		emu_cfg.enabled = orig_enabled;
++		AK_LOG("  emu present="); AK_LOGX(emu_info.present);
++		AK_LOG(" mkey="); AK_LOGX(emu_info.mkey);
++		AK_LOG(" ts="); AK_LOGTS(emu_info.timestamp); AK_LOG("\n");
++	} else {
++		AK_LOG("emu skip: not configured\n");
++	}
++
++	if (!sys_info.present && !emu_info.present) {
++		AK_LOG("skip: no NAND present\n");
++		goto done;
++	}
++
++	/* --------- Compare with last known state. --------- */
++
++	ak_state_t prev = {0};
++	bool have_prev = _ak_read_state(&prev);
++	if (have_prev && prev.chip_t210b01 != (h_cfg.t210b01 ? 1 : 0))
++		have_prev = false;
++
++	bool sys_changed = sys_info.present && (!have_prev
++		|| memcmp(prev.sys_timestamp, sys_info.timestamp, 14) != 0
++		|| prev.sys_mkey != sys_info.mkey
++		|| prev.sys_present != sys_info.present);
++
++	bool emu_changed = emu_info.present && (!have_prev
++		|| memcmp(prev.emu_timestamp, emu_info.timestamp, 14) != 0
++		|| prev.emu_mkey != emu_info.mkey
++		|| prev.emu_present != emu_info.present);
++
++	bool emu_removed  = have_prev && prev.emu_present && !emu_info.present;
++	bool keys_missing = (f_stat(AK_PATH_PRODKEYS, &fno) != FR_OK);
++	bool force_dump   = (f_stat(AK_PATH_FORCE, &fno) == FR_OK);
++
++	AK_LOG("changed: sys="); AK_LOGX(sys_changed);
++	AK_LOG(" emu="); AK_LOGX(emu_changed);
++	AK_LOG(" removed="); AK_LOGX(emu_removed);
++	AK_LOG(" missing="); AK_LOGX(keys_missing);
++	AK_LOG(" force="); AK_LOGX(force_dump); AK_LOG("\n");
++
++	if (!sys_changed && !emu_changed && !emu_removed && !keys_missing && !force_dump) {
++		AK_LOG("skip: nothing changed\n");
++		goto done;
++	}
++
++	/* --------- Something changed: arm request and hand off to Lockpick. --------- */
++
++	ak_request_t req = {0};
++	req.magic       = AK_REQ_MAGIC;
++	rewarning: in the working copy of 'bootloader/keys/autokeys.h', LF will be replaced by CRLF the next time Git touches it
+q.version     = AK_REQ_VER;
++	req.retry       = next_retry;
++	req.target_mask = (u8)((sys_info.present ? 0x01 : 0) | (emu_info.present ? 0x02 : 0));
++	memcpy(req.sys_timestamp, sys_info.timestamp, 14);
++	req.sys_mkey = sys_info.mkey;
++	memcpy(req.emu_timestamp, emu_info.timestamp, 14);
++	req.emu_mkey = emu_info.mkey;
++	_ak_write_request(&req);
++
++	AK_LOG("launch lockpick.bin; retry="); AK_LOGX(req.retry);
++	AK_LOG(" mask="); AK_LOGX(req.target_mask); AK_LOG("\n");
++	AK_FLUSH();
++
++	/* Restore gfx mute: Lockpick will decide its own display policy. */
++	gfx_con.mute = saved_mute;
++
++	/* One-way chainload. _launch_payload does sd_end + hw_deinit internally. */
++	_launch_payload((char *)AK_PATH_LOCKPICK, false, false);
++
++	/* If we're still here, the launch failed (e.g., file too big at load time).
++	 * Delete the request so we don't infinitely re-try on next boot. */
++	sd_mount();
++	AK_LOG("launch returned (failed); request deleted\n");
++	AK_FLUSH();
++	f_unlink(AK_PATH_REQUEST);
++	return;
++
++done:
++	/* Downstream code (_auto_launch, nyx) relies on SD being mounted. Probing toggled
++	 * emu state and may have ended eMMC — make sure SD is still usable. */
++	sd_mount();
++	AK_FLUSH();
++	gfx_con.mute = saved_mute;
++}
+diff --git a/bootloader/keys/autokeys.h b/bootloader/keys/autokeys.h
+new file mode 100644
+index 00000000..cf653026
+--- /dev/null
++++ b/bootloader/keys/autokeys.h
+@@ -0,0 +1,18 @@
++/*
++ * 4IFIR Autokeys — detector + chainload-to-Lockpick for silent prod.keys refresh.
++ *
++ * The crypto itself stays in Lockpick. Hekate only:
++ *   - probes pkg1 timestamp+mkey on SysMMC/EmuMMC
++ *   - compares against bootloader/sys/autokeys.bin
++ *   - if stale, writes a request marker and chainloads bootloader/sys/lockpick.bin
++ *
++ * Copyright (c) 2026 4IFIR
++ * SPDX-License-Identifier: GPL-2.0-only
++ */
++
++#ifndef _AUTOKEYS_H_
++#define _AUTOKEYS_H_
++
++void autokeys_dump_if_needed(void);
++
++#endif
+diff --git a/bootloader/main.c b/bootloader/main.c
+index 99816df5..f5923f77 100644
+--- a/bootloader/main.c
++++ b/bootloader/main.c
+@@ -35,6 +35,8 @@
+ #include "frontend/fe_tools.h"
+ #include "frontend/fe_info.h"
+ 
++#include "keys/autokeys.h"
++
+ hekate_config h_cfg;
+ boot_cfg_t __attribute__((section ("._boot_cfg"))) b_cfg;
+ const volatile ipl_ver_meta_t __attribute__((section ("._ipl_version"))) ipl_ver = {
+@@ -151,7 +153,7 @@ bool is_ipl_updated(void *buf, u32 size, const char *path, bool force)
+ 	return true;
+ }
+ 
+-static void _launch_payload(char *path, bool update, bool clear_screen)
++void _launch_payload(char *path, bool update, bool clear_screen)
+ {
+ 	if (clear_screen)
+ 		gfx_clear_grey(0x1B);
+@@ -867,7 +869,7 @@ static void _auto_launch()
+ 		_check_power_off_from_hos();
+ 
+ 	// 4ekate: Always parse bootloader/ini/ to check for multiple configs
+-	bool has_ini_list = ini_parse(&ini_list_sections, "bootloader/ini", true);
++	bool has_ini_list = !ini_parse(&ini_list_sections, "bootloader/ini", true);
+ 
+ 	// 4ekate: Count configs in bootloader/ini/ folder
+ 	u32 ini_folder_config_count = 0;
+@@ -1580,6 +1582,7 @@ skip_lp0_minerva_config:
+ 	if (!(h_cfg.errors & ERR_SD_BOOT_EN))
+ 	{
+ 		_check_for_updated_bootloader();
++		autokeys_dump_if_needed();
+ 		_auto_launch();
+ 	}
+ 
+
+-------------------------------------------------------------------------------
+SECTION 2 of 3 — LOCKPICK_RCM repo  (main.c + keys.c + keys.h + new auto/*)
+-------------------------------------------------------------------------------
+
+diff --git a/source/main.c b/source/main.c
+--- a/source/main.c
++++ b/source/main.c
+@@ -385,6 +385,8 @@ void dump_mariko_partial_keys()
+ 
+ extern void pivot_stack(u32 stack_top);
+ 
++#include "auto/silent.h"
++
+ void ipl_main()
+ {
+ 	// Do initial HW configuration. This is compatible with consecutive reruns without a reset.
+@@ -454,6 +456,10 @@ void ipl_main()
+ 	}
+ 
+ 	minerva_change_freq(FREQ_800);
++
++	/* 4IFIR: if hekate placed an autodump request marker on SD, handle it now
++	 * — silent dump + chainload back to hekate. No-op when marker is absent. */
++	autokeys_silent_dispatch();
+ 
+ 	while (true)
+ 		tui_do_menu(&menu_top);
+diff --git a/source/keys/keys.h b/source/keys/keys.h
+--- a/source/keys/keys.h
++++ b/source/keys/keys.h
+@@ -45,6 +45,7 @@
+ #define SAVE_KEY_FAMILY_VAR(name, varname, start) _save_key_family(#name, varname, start, ARRAY_SIZE(varname), sizeof(*(varname)), text_buffer)
+ 
+ void dump_keys();
++u32 dump_keys_silent(void);
+ int save_mariko_partial_keys(u32 start, u32 count, bool append);
+ void derive_amiibo_keys();
+ 
+diff --git a/source/keys/keys.c b/source/keys/keys.c
+--- a/source/keys/keys.c
++++ b/source/keys/keys.c
+@@ -847,3 +847,25 @@ void dump_keys() {
+     }
+     gfx_clear_grey(0x1B);
+ }
++
++/* Silent variant for the 4IFIR autokeys dispatcher.
++ * No screen clear, no header, no button wait — just derive and save.
++ * Returns _key_count (> 0 means at least one key made it into prod.keys). */
++u32 dump_keys_silent(void) {
++    minerva_change_freq(FREQ_1600);
++
++    _key_count = 0;
++    _titlekey_count = 0;
++    color_idx = 0;
++
++    start_time = get_tmr_us();
++
++    _derive_keys();
++
++    if (emmc_storage.initialized) {
++        sdmmc_storage_end(&emmc_storage);
++    }
++
++    minerva_change_freq(FREQ_800);
++
++    return _key_count;
++}
+diff --git a/source/auto/silent.h b/source/auto/silent.h
+new file mode 100644
+--- /dev/null
++++ b/source/auto/silent.h
+@@ -0,0 +1,21 @@
++/*
++ * 4IFIR Lockpick silent dispatcher — runs before the main menu and
++ * honours the bootloader/sys/autokeys.request marker placed by hekate.
++ *
++ * If the marker exists, performs a silent key dump via dump_keys_silent(),
++ * writes bootloader/sys/autokeys.bin state, removes the marker, and
++ * chainloads bootloader/update.bin (hekate) — one-way.
++ *
++ * If the marker is missing, does nothing and returns immediately so the
++ * normal UI menu loop runs as usual.
++ *
++ * Copyright (c) 2026 4IFIR
++ * SPDX-License-Identifier: GPL-2.0-only
++ */
++
++#ifndef _AUTOKEYS_SILENT_H_
++#define _AUTOKEYS_SILENT_H_
++
++void autokeys_silent_dispatch(void);
++
++#endif
+diff --git a/source/auto/silent.c b/source/auto/silent.c
+new file mode 100644
+--- /dev/null
++++ b/source/auto/silent.c
+@@ -0,0 +1,199 @@
++/*
++ * 4IFIR Lockpick silent dispatcher.
++ *
++ * Reads sd:/bootloader/sys/autokeys.request (written by hekate's detector),
++ * runs silent dumps via dump_keys_silent() for the targeted NAND(s),
++ * writes sd:/bootloader/sys/autokeys.bin on success, removes the request,
++ * and chainloads hekate via sd:/bootloader/update.bin. One-way jump.
++ *
++ * Copyright (c) 2026 4IFIR
++ * SPDX-License-Identifier: GPL-2.0-only
++ */
++
++#include "silent.h"
++
++#include <string.h>
++
++#include <display/di.h>
++#include <gfx_utils.h>
++#include <libs/fatfs/ff.h>
++#include <mem/minerva.h>
++
++#include "../config.h"
++#include "../keys/keys.h"
++#include "../storage/emummc.h"
++
++extern hekate_config h_cfg;
++extern int launch_payload(char *path, bool clear_screen);
++
++/* ---------- Constants ---------- */
++
++#define AK_STATE_MAGIC    0x49344B41u   /* 'AK4I' — must match hekate's autokeys.c */
++#define AK_STATE_VER      2
++#define AK_REQ_MAGIC      0x5152414Bu   /* 'AKRQ' */
++#define AK_REQ_VER        1
++#define AK_MAX_RETRY      3
++
++/* Lockpick's FatFs is built with FF_STR_VOLUME_ID=1 — prefixes are optional but
++ * the existing keys.c uses "sd:/" consistently, we match that style. */
++#define AK_PATH_STATE     "sd:/bootloader/sys/autokeys.bin"
++#define AK_PATH_REQUEST   "sd:/bootloader/sys/autokeys.request"
++#define AK_PATH_FAILED    "sd:/bootloader/sys/autokeys.failed"
++#define AK_PATH_UPDATE    "bootloader/update.bin"
++
++/* ---------- File layouts (must match hekate) ---------- */
++
++typedef struct {
++	u32 magic;
++	u8  version;
++	u8  chip_t210b01;
++	u8  reserved[2];
++	u8  sys_timestamp[14];
++	u8  sys_mkey;
++	u8  sys_present;
++	u8  emu_timestamp[14];
++	u8  emu_mkey;
++	u8  emu_present;
++} __attribute__((packed)) ak_state_t;
++
++typedef struct {
++	u32 magic;
++	u8  version;
++	u8  retry;
++	u8  target_mask;
++	u8  reserved;
++	u8  sys_timestamp[14];
++	u8  sys_mkey;
++	u8  emu_timestamp[14];
++	u8  emu_mkey;
++} __attribute__((packed)) ak_request_t;
++
++/* ---------- Helpers ---------- */
++
++static bool _ak_read_request(ak_request_t *out)
++{
++	FIL fp;
++	UINT br = 0;
++	if (f_open(&fp, AK_PATH_REQUEST, FA_READ | FA_OPEN_EXISTING))
++		return false;
++	FRESULT r = f_read(&fp, out, sizeof(*out), &br);
++	f_close(&fp);
++	if (r != FR_OK || br != sizeof(*out))
++		return false;
++	if (out->magic != AK_REQ_MAGIC || out->version != AK_REQ_VER)
++		return false;
++	return true;
++}
++
++static void _ak_write_request(const ak_request_t *req)
++{
++	FIL fp;
++	f_mkdir("sd:/bootloader");
++	f_mkdir("sd:/bootloader/sys");
++	if (f_open(&fp, AK_PATH_REQUEST, FA_CREATE_ALWAYS | FA_WRITE))
++		return;
++	f_write(&fp, req, sizeof(*req), NULL);
++	f_close(&fp);
++}
++
++static void _ak_write_state(const ak_state_t *st)
++{
++	FIL fp;
++	f_mkdir("sd:/bootloader");
++	f_mkdir("sd:/bootloader/sys");
++	if (f_open(&fp, AK_PATH_STATE, FA_CREATE_ALWAYS | FA_WRITE))
++		return;
++	f_write(&fp, st, sizeof(*st), NULL);
++	f_close(&fp);
++}
++
++static void _ak_mark_failed(void)
++{
++	FIL fp;
++	f_mkdir("sd:/bootloader");
++	f_mkdir("sd:/bootloader/sys");
++	if (f_open(&fp, AK_PATH_FAILED, FA_CREATE_ALWAYS | FA_WRITE))
++		return;
++	static const char msg[] = "Lockpick autodump failed. "
++	                          "Run Lockpick manually, then delete this file.\n";
++	f_write(&fp, msg, sizeof(msg) - 1, NULL);
++	f_close(&fp);
++}
++
++/* ---------- Main entry ---------- */
++
++void autokeys_silent_dispatch(void)
++{
++	ak_request_t req = {0};
++	if (!_ak_read_request(&req))
++		return; /* no marker → normal manual UI flow */
++
++	/* Retry cap: if we already burned AK_MAX_RETRY attempts, give up.
++	 * (Hekate handles this too, but we double-check in case Lockpick was
++	 * launched by something else that didn't enforce the cap.) */
++	if (req.retry >= AK_MAX_RETRY) {
++		_ak_mark_failed();
++		f_unlink(AK_PATH_REQUEST);
++		return;
++	}
++
++	/* Checkpoint: bump retry and rewrite so the counter survives any subsequent crash. */
++	req.retry++;
++	_ak_write_request(&req);
++
++	/* Silent from here on: mute console, kill backlight. */
++	gfx_con.mute = true;
++	display_backlight_brightness(0, 0);
++
++	u32 total_keys = 0;
++	bool emu_targeted = (req.target_mask & 0x02) != 0;
++
++	/* ---------- Sys pass ---------- */
++	if (req.target_mask & 0x01) {
++		h_cfg.emummc_force_disable = true;
++		emu_cfg.enabled = 0;
++		u32 n = dump_keys_silent();
++		if (n > 0)
++			total_keys += n;
++	}
++
++	/* ---------- Emu pass ---------- */
++	/* Writes prod.keys (overwrites sys pass — content is equivalent by master-key
++	 * tables anyway) and title.keys from emu's installed tickets. If emu has no
++	 * tickets, title.keys from the sys pass stays intact (we never renamed it). */
++	if (emu_targeted) {
++		emummc_load_cfg();
++		/* Only run if emu is actually configured. (target_mask may be stale.) */
++		if (emu_cfg.sector != 0 || emu_cfg.path != NULL) {
++			h_cfg.emummc_force_disable = false;
++			emu_cfg.enabled = 1;
++			u32 n = dump_keys_silent();
++			if (n > 0)
++				total_keys += n;
++		}
++	}
++
++	/* ---------- Commit on success ---------- */
++	if (total_keys > 0) {
++		ak_state_t st = {0};
++		st.magic        = AK_STATE_MAGIC;
++		st.version      = AK_STATE_VER;
++		st.chip_t210b01 = h_cfg.t210b01 ? 1 : 0;
++		memcpy(st.sys_timestamp, req.sys_timestamp, 14);
++		st.sys_mkey    = req.sys_mkey;
++		st.sys_present = (req.target_mask & 0x01) ? 1 : 0;
++		memcpy(st.emu_timestamp, req.emu_timestamp, 14);
++		st.emu_mkey    = req.emu_mkey;
++		st.emu_present = (req.target_mask & 0x02) ? 1 : 0;
++		_ak_write_state(&st);
++
++		f_unlink(AK_PATH_REQUEST);
++	}
++	/* On failure: leave request in place with bumped retry — hekate will retry or
++	 * give up after AK_MAX_RETRY. */
++
++	/* Chainload back to hekate. One-way. If this returns, it failed;
++	 * unmute so the user sees the error banner and drops into Lockpick's menu. */
++	launch_payload(AK_PATH_UPDATE, false);
++	gfx_con.mute = false;
++}
+
+-------------------------------------------------------------------------------
+SECTION 3 of 3 (OPTIONAL) — Build automation
+-------------------------------------------------------------------------------
+This is the 4IFIR-specific Windows build script change. It shows one way to
+wire Lockpick into the main build: build it once at the top, then copy
+`Lockpick_RCM.bin` into each stage output as `bootloader/sys/lockpick.bin`.
+Your fork probably has a different build wrapper — adapt accordingly.
+
+diff --git a/4IFIR.bat b/4IFIR.bat
+index 485fc1e6..b21f204f 100644
+--- a/4IFIR.bat
++++ b/4IFIR.bat
+@@ -18,6 +18,33 @@ copy /Y "%SDRAM_CONFIG_T210B01%" "%SDRAM_CONFIG_T210B01%.bak" >nul
+ if exist ".\build_temp_ST" rmdir /S /Q ".\build_temp_ST"
+ if exist ".\build_temp_ST2" rmdir /S /Q ".\build_temp_ST2"
+ 
++:: ========================================
++:: Pre-stage: build Lockpick (silent-aware) once — reused for both stages.
++:: Lockpick's SDRAM init is self-contained; it doesn't depend on hekate's
++:: sdram_config.inl values that the stages toggle.
++:: ========================================
++set LOCKPICK_DIR=..\Lockpick
++set LOCKPICK_BIN=%LOCKPICK_DIR%\output\Lockpick_RCM.bin
++
++echo.
++echo ========================================
++echo  Building Lockpick (silent-aware)
++echo ========================================
++pushd "%LOCKPICK_DIR%"
++make -j64
++if %ERRORLEVEL% NEQ 0 (
++    popd
++    echo ERROR: Lockpick build failed!
++    goto restore_and_exit
++)
++popd
++
++if not exist "%LOCKPICK_BIN%" (
++    echo ERROR: Lockpick_RCM.bin missing after build: %LOCKPICK_BIN%
++    goto restore_and_exit
++)
++echo Lockpick built OK.
++
+ :: ========================================
+ :: Stage 1 (4ekate) Build
+ :: ========================================
+@@ -63,6 +90,8 @@ copy /Y .\output\libsys_lp0.bso .\build_temp_ST\bootloader\sys\ >nul
+ copy /Y .\output\libsys_minerva.bso .\build_temp_ST\bootloader\sys\ >nul
+ copy /Y .\output\module_sample.bso .\build_temp_ST\bootloader\sys\ >nul
+ copy /Y .\output\nyx.bin .\build_temp_ST\bootloader\sys\ >nul
++:: Autokeys silent-Lockpick: hekate chainloads this when prod.keys is stale.
++copy /Y "%LOCKPICK_BIN%" .\build_temp_ST\bootloader\sys\lockpick.bin >nul
+ 
+ echo Stage 1 build complete and saved!
+ 
+@@ -111,6 +140,8 @@ copy /Y .\output\libsys_lp0.bso .\build_temp_ST2\bootloader\sys\ >nul
+ copy /Y .\output\libsys_minerva.bso .\build_temp_ST2\bootloader\sys\ >nul
+ copy /Y .\output\module_sample.bso .\build_temp_ST2\bootloader\sys\ >nul
+ copy /Y .\output\nyx.bin .\build_temp_ST2\bootloader\sys\ >nul
++:: Autokeys silent-Lockpick for Stage 2.
++copy /Y "%LOCKPICK_BIN%" .\build_temp_ST2\bootloader\sys\lockpick.bin >nul
+ 
+ echo Stage 2 build complete and saved!
+ 
+
+-------------------------------------------------------------------------------
+END OF PATCH
+-------------------------------------------------------------------------------

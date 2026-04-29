@@ -1,0 +1,67 @@
+From e2f762fb89dd7ef3fb5d7fe7331167b39cfdfc95 Mon Sep 17 00:00:00 2001
+From: rashevskyv <rashevsky.v@gmail.com>
+Date: Sat, 10 May 2025 02:11:44 +0300
+Subject: [PATCH] removed easter egg
+
+---
+ .../emulated_switch_controller.cpp            | 12 +++++------
+ .../source/controllers/switch_controller.cpp  | 20 +++++++++----------
+ 2 files changed, 16 insertions(+), 16 deletions(-)
+
+diff --git a/mc_mitm/source/controllers/emulated_switch_controller.cpp b/mc_mitm/source/controllers/emulated_switch_controller.cpp
+index 1d67f7b..4ee394a 100644
+--- a/mc_mitm/source/controllers/emulated_switch_controller.cpp
++++ b/mc_mitm/source/controllers/emulated_switch_controller.cpp
+@@ -294,12 +294,12 @@ namespace ams::controller {
+ 
+         R_TRY(m_virtual_memory.Read(read_addr, response.data.serial_flash_read.data, read_size));
+ 
+-        if (read_addr == 0x6050) {
+-            if (ams::mitm::GetSystemLanguage() == 10) {
+-                const u8 data[] = { 0xff, 0xd7, 0x00, 0x00, 0x57, 0xb7, 0x00, 0x57, 0xb7, 0x00, 0x57, 0xb7 };
+-                std::memcpy(response.data.serial_flash_read.data, data, sizeof(data));
+-            }
+-        }
++        // if (read_addr == 0x6050) {
++        //     if (ams::mitm::GetSystemLanguage() == 10) {
++        //         u8 data[] = {0xff, 0xd7, 0x00, 0x00, 0x57, 0xb7, 0x00, 0x57, 0xb7, 0x00, 0x57, 0xb7};
++        //         std::memcpy(response.data.serial_flash_read.data, data, sizeof(data));
++        //     }
++        // }
+ 
+         return this->FakeHidCommandResponse(&response);
+     }
+diff --git a/mc_mitm/source/controllers/switch_controller.cpp b/mc_mitm/source/controllers/switch_controller.cpp
+index 807d225..c96f5c3 100644
+--- a/mc_mitm/source/controllers/switch_controller.cpp
++++ b/mc_mitm/source/controllers/switch_controller.cpp
+@@ -84,16 +84,16 @@ namespace ams::controller {
+         this->UpdateControllerState(report);
+ 
+         auto input_report = reinterpret_cast<SwitchInputReport *>(m_input_report.data);
+-        if (input_report->id == 0x21) {
+-            if (input_report->type0x21.hid_command_response.id == HidCommand_SerialFlashRead) {
+-                if (input_report->type0x21.hid_command_response.data.serial_flash_read.address == 0x6050) {
+-                    if (ams::mitm::GetSystemLanguage() == 10) {
+-                        u8 data[] = {0xff, 0xd7, 0x00, 0x00, 0x57, 0xb7, 0x00, 0x57, 0xb7, 0x00, 0x57, 0xb7};
+-                        std::memcpy(input_report->type0x21.hid_command_response.data.serial_flash_read.data, data, sizeof(data));
+-                    }
+-                }
+-            }
+-        }
++        // if (input_report->id == 0x21) {
++        //     if (input_report->type0x21.hid_command_response.id == HidCommand_SerialFlashRead) {
++        //         if (input_report->type0x21.hid_command_response.data.serial_flash_read.address == 0x6050) {
++        //             if (ams::mitm::GetSystemLanguage() == 10) {
++        //                 u8 data[] = {0xff, 0xd7, 0x00, 0x00, 0x57, 0xb7, 0x00, 0x57, 0xb7, 0x00, 0x57, 0xb7};
++        //                 std::memcpy(input_report->type0x21.hid_command_response.data.serial_flash_read.data, data, sizeof(data));
++        //             }
++        //         }
++        //     }
++        // }
+ 
+         this->ApplyButtonCombos(&input_report->buttons); 
+ 
+-- 
+2.53.0.windows.1
+
