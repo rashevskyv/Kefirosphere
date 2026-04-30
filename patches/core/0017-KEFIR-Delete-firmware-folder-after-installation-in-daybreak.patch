@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rashevskyv <rashevsky.v@gmail.com>
+Date: Wed, 30 Apr 2026 13:48:00 +0300
+Subject: [PATCH] KEFIR: Delete firmware folder after installation in daybreak
+
+---
+ troposphere/daybreak/source/ui.cpp | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/troposphere/daybreak/source/ui.cpp b/troposphere/daybreak/source/ui.cpp
+index bdef4086a..944881a1a 100644
+--- a/troposphere/daybreak/source/ui.cpp
++++ b/troposphere/daybreak/source/ui.cpp
+@@ -1145,6 +1145,30 @@ namespace dbk {
+                 /* Log success. */
+                 this->LogText("Update applied successfully.\n");
+
++                /* Delete the update directory. */
++                if (std::strlen(g_update_path) > 0) {
++                    this->LogText("Deleting update directory...\n");
++
++                    /* Remove trailing slash if present. */
++                    char path_to_delete[FS_MAX_PATH];
++                    strncpy(path_to_delete, g_update_path, sizeof(path_to_delete)-1);
++                    size_t len = std::strlen(path_to_delete);
++                    if (len > 0 && path_to_delete[len-1] == '/') {
++                        path_to_delete[len-1] = '\0';
++                    }
++
++                    /* Delete the directory recursively. */
++                    FsFileSystem *fs;
++                    char translated_path[FS_MAX_PATH] = {};
++                    if (fsdevTranslatePath(path_to_delete, &fs, translated_path) != -1) {
++                        if (R_SUCCEEDED(fsFsDeleteDirectoryRecursively(fs, translated_path))) {
++                            this->LogText("Update directory deleted.\n");
++                        } else {
++                            this->LogText("Failed to delete update directory.\n");
++                        }
++                    }
++                }
++
+                 if (g_reset_to_factory) {
+                     if (R_FAILED(rc = nsResetToFactorySettingsForRefurbishment())) {
+                         /* Fallback on ResetToFactorySettings. */
+--
+2.53.0.windows.1
+

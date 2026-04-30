@@ -164,6 +164,9 @@ def main():
             "update_changelog.py",
             "sort_changelog.py",
         ],
+        "Site & Links": [
+            "update_site.py",
+        ],
     }
 
     # Default pipeline (script_name -> order)

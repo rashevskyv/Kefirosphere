@@ -485,9 +485,74 @@ def _extract_tool_names_from_block(block_text):
     return sorted(names)
 
 
+def check_and_translate_preamble(changelog_path):
+    """Check if ENG preamble is shorter than UKR preamble and translate if needed.
+
+    Preamble is the text between '#### **UKR**' and the first '**XXX**' version marker.
+    """
+    if not os.path.exists(changelog_path):
+        return
+
+    with open(changelog_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    parts = content.split('#### **ENG**')
+    if len(parts) != 2:
+        return
+
+    ukr_part, eng_part = parts[0], '#### **ENG**' + parts[1]
+
+    # Extract UKR preamble (from #### **UKR** to first **XXX**)
+    ukr_header_match = re.search(r'####\s*\*\*UKR\*\*\s*\n(.*?)(?=\*\*\d+\*\*)', ukr_part, re.DOTALL)
+    ukr_preamble = ukr_header_match.group(1).strip() if ukr_header_match else ""
+
+    # Extract ENG preamble (from #### **ENG** to first **XXX**)
+    eng_header_match = re.search(r'####\s*\*\*ENG\*\*\s*\n(.*?)(?=\*\*\d+\*\*)', eng_part, re.DOTALL)
+    eng_preamble = eng_header_match.group(1).strip() if eng_header_match else ""
+
+    ukr_lines = [l for l in ukr_preamble.split('\n') if l.strip()]
+    eng_lines = [l for l in eng_preamble.split('\n') if l.strip()]
+
+    if len(eng_lines) >= len(ukr_lines):
+        print(f"[CHANGELOG] Preamble OK (UKR: {len(ukr_lines)} lines, ENG: {len(eng_lines)} lines)")
+        return
+
+    print(f"[CHANGELOG] Preamble OUT OF SYNC (UKR: {len(ukr_lines)} lines, ENG: {len(eng_lines)} lines). Translating...")
+
+    if not ukr_preamble:
+        print("[CHANGELOG] UKR preamble is empty, nothing to translate.")
+        return
+
+    translated = translate_block_with_openai(ukr_preamble)
+    if not translated:
+        print("[CHANGELOG] Preamble translation returned empty result, skipping update.", file=sys.stderr)
+        return
+
+    # Replace ENG preamble
+    if eng_header_match:
+        # Find where the preamble ends (first **XXX**)
+        first_ver_match = re.search(r'\*\*\d+\*\*', eng_part)
+        if first_ver_match:
+            new_eng = eng_part[:eng_header_match.start(1)] + translated + "\n\n" + eng_part[first_ver_match.start():]
+        else:
+            new_eng = eng_part[:eng_header_match.start(1)] + translated + "\n"
+    else:
+        # No preamble exists, insert after #### **ENG**
+        header_end = eng_part.find('\n')
+        if header_end != -1:
+            new_eng = eng_part[:header_end+1] + translated + "\n" + eng_part[header_end+1:]
+        else:
+            new_eng = eng_part + "\n" + translated + "\n"
+
+    with open(changelog_path, 'w', encoding='utf-8') as f:
+        f.write(ukr_part + new_eng)
+
+    print(f"[CHANGELOG] Preamble translated successfully.")
+
+
 def check_and_force_sync_eng_block(changelog_path, kefir_ver):
     """Compare UKR and ENG changelog blocks for kefir_ver.
-    
+
     If tool count or tool names differ, force-translate the UKR block to ENG.
     """
     if not os.path.exists(changelog_path):
@@ -863,6 +928,9 @@ def main():
     kefir_ver = get_kefir_version(kefir_root_dir)
     if kefir_ver and kefir_ver != "UNKNOWN":
         check_and_force_sync_eng_block(changelog_path, kefir_ver)
+
+    # Check and translate preamble if needed
+    check_and_translate_preamble(changelog_path)
 
     tools_config = load_tools_config()
     for tool in tools_config:

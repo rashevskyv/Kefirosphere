@@ -9,6 +9,13 @@ import sys
 import subprocess
 from pathlib import Path
 
+# Force UTF-8 output on Windows
+if sys.platform == "win32":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 
 def load_env():
     """Load .env file."""
@@ -59,8 +66,8 @@ def setup_git_credentials():
     git_credentials.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
     git_credentials.chmod(0o600)  # Secure permissions
 
-    print(f"✓ Git credentials configured for {owner}@github.com")
-    print(f"✓ Credentials stored in {git_credentials}")
+    print(f"[OK] Git credentials configured for {owner}@github.com")
+    print(f"[OK] Credentials stored in {git_credentials}")
     print("\nYou can now push/pull without entering password!")
 
 

@@ -352,59 +352,49 @@ def git_commit_and_push(version: str, build_type: str):
         print("Continuing anyway...")
 
 
+def update_site_and_nxlinks(version: str):
+    """Update site and nx-links - prompts user to run ___build.bat on Windows."""
+    print_section("Updating Site and nx-links")
+
+    # Check if running on WSL
+    if sys.platform == "linux" and os.path.exists("/mnt/c"):
+        print("Running on WSL. Site build requires Windows environment.")
+        print("\nPlease switch to Windows and run:")
+        print("  D:\\_kefir\\___build.bat")
+        print("\nPress Enter when done to continue...")
+        input()
+        return
+
+    # If on Windows, still prompt for manual build
+    print("Please run the site build script:")
+    print("  D:\\_kefir\\___build.bat")
+    print("\nPress Enter when done to continue...")
+    input()
+
+
 def main():
-    """Main build process."""
+    """Main build process - delegates to Windows ___build.bat."""
     print_section("Kefir Build Script")
 
     # Read version
     version = read_version()
 
-    # Prompt for build type
-    build_type = prompt_build_type()
+    # Check if running on WSL
+    if sys.platform == "linux" and os.path.exists("/mnt/c"):
+        print("\nThis script requires Windows environment for Jekyll build.")
+        print("\nPlease switch to Windows and run:")
+        print("  D:\\_kefir\\___build.bat")
+        print("\nPress Enter when done...")
+        input()
+    else:
+        # On Windows
+        print("\nPlease run the build script:")
+        print("  D:\\_kefir\\___build.bat")
+        print("\nPress Enter when done...")
+        input()
 
-    # Update version file in kefir-updater
-    print_section("Updating Version File")
-    version_source = WORKING_DIR / "_kefir" / "version"
-    version_dest = KEFIR_SOURCE / "switch" / "kefir-updater" / "version"
-    if version_source.exists() and version_dest.parent.exists():
-        shutil.copy2(version_source, version_dest)
-        print(f"Updated: {version_dest}")
-
-    # Clean and prepare build directory
-    clean_build_dir()
-
-    # Copy files
-    copy_kefir_files()
-
-    # Fix attributes
-    fix_attributes()
-
-    # Copy metadata
-    copy_metadata_files(build_type)
-
-    # Create archive
-    archive_path = create_archive(version, build_type)
-
-    # Clean build directory
-    if BUILD_DIR.exists():
-        print(f"\nCleaning up build directory...")
-        shutil.rmtree(BUILD_DIR)
-
-    # Git operations (release only)
-    git_commit_and_push(version, build_type)
-
-    # Done
     print_section("Build Complete")
-    print(f"Archive: {archive_path}")
-    print(f"Build type: {build_type}")
     print(f"Version: {version}")
-
-    # For release builds, mention PowerShell script
-    if build_type == "release":
-        ps_script = Path("D:/git/scripts/build_kefir.ps1")
-        if ps_script.exists():
-            print(f"\nNote: Legacy PowerShell script exists at {ps_script}")
-            print("Consider running it manually if needed.")
 
 
 if __name__ == "__main__":
