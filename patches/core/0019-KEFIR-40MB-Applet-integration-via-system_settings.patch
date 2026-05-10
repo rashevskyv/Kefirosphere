@@ -1,0 +1,276 @@
+From 3a969161d34baf5120d73b766619525866e7f423 Mon Sep 17 00:00:00 2001
+From: rashevskyv <rashevsky.v@gmail.com>
+Date: Wed, 6 May 2026 18:45:15 +0300
+Subject: [PATCH] KEFIR: 40MB Applet integration via system_settings.ini
+
+---
+ Makefile                                      | 19 +------------
+ config_templates/system_settings.ini          |  3 +++
+ .../program/source/smc/secmon_smc_info.cpp    |  3 +++
+ .../program/source/smc/secmon_smc_info.hpp    |  1 +
+ fusee/program/source/fusee_setup_horizon.cpp  | 27 +++++++++++--------
+ .../secmon/secmon_monitor_context.hpp         |  2 ++
+ .../nintendo/nx/kern_k_system_control.cpp     | 26 +++++++++++++-----
+ .../board/nintendo/nx/kern_secure_monitor.hpp |  2 ++
+ .../include/stratosphere/spl/spl_types.hpp    |  2 ++
+ .../source/set_mitm/setsys_mitm_service.cpp   | 17 +++++++++++-
+ 10 files changed, 65 insertions(+), 37 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index 926ba4713..5c3160a0e 100644
+--- a/Makefile
++++ b/Makefile
+@@ -144,28 +144,12 @@ oc:
+ 	@echo "                  FINISH building OC!"
+ 	@echo "---------------------------------------------------------"
+ 
+-40mb:
+-	@echo "---------------------------------------------------------"
+-	@echo "                  Building 40MB Mesosphere!"
+-	@echo "---------------------------------------------------------"
+-	git checkout 40mb
+-	git merge master --no-edit
+-	$(MAKE) clean -j$(NPROCS)
+-	$(MAKE) -f atmosphere.mk package3 ATMOSPHERE_GIT_REVISION="K$(KEF_VERSION)-40MB" -j$(NPROCS)
+-	mkdir -p $(KEF_40MB_DIR)/atmosphere/
+-	cp fusee/out/nintendo_nx_arm_armv4t/release/package3 $(KEF_40MB_DIR)/atmosphere/package3
+-	python utilities/insert_splash_screen.py ~/dev/_kefir/bootlogo/splash_logo.png $(KEF_40MB_DIR)/atmosphere/package3
+-	@echo "---------------------------------------------------------"
+-	@echo "            FINISH building 40MB!"
+-	@echo "---------------------------------------------------------"
+-
+ kefir:
+ 	git checkout master
+ 	$(MAKE) clean -j$(NPROCS)
+ 	$(MAKE) nx_release -j$(NPROCS)
+ 	$(MAKE) 8gb_DRAM SKIP_FETCH=1
+ 	$(MAKE) oc
+-	$(MAKE) 40mb
+ 
+ kefir_logo:
+ 	git checkout master
+@@ -174,6 +158,5 @@ kefir_logo:
+ 	$(MAKE) nx_release -j$(NPROCS)
+ 	$(MAKE) 8gb_DRAM SKIP_FETCH=1
+ 	$(MAKE) oc
+-	$(MAKE) 40mb
+ 
+-.PHONY: all clean clean-all kefir-version update clean-logo clear 8gb_DRAM oc kefir 40mb $(foreach config,$(ATMOSPHERE_BUILD_CONFIGS), $(config) clean-$(config))
+\ No newline at end of file
++.PHONY: all clean clean-all kefir-version update clean-logo clear 8gb_DRAM oc kefir $(foreach config,$(ATMOSPHERE_BUILD_CONFIGS), $(config) clean-$(config))
+\ No newline at end of file
+diff --git a/config_templates/system_settings.ini b/config_templates/system_settings.ini
+index f9c7f61bb..310ce3b19 100644
+--- a/config_templates/system_settings.ini
++++ b/config_templates/system_settings.ini
+@@ -21,6 +21,9 @@
+ ; Control whether erpt reports should always be preserved, instead of automatically cleaning periodically.
+ ; disable_automatic_report_cleanup = u8!0x0
+ [atmosphere]
++; Controls whether 40MB applet memory is forced for homebrew
++; 0 = Disabled, 1 = Enabled
++; force_40mb_applet = u8!0x0
+ ; Reboot from fatal automatically after some number of milliseconds.
+ ; If field is not present or 0, fatal will wait indefinitely for user input.
+ ; fatal_auto_reboot_interval = u64!0x0
+diff --git a/exosphere/program/source/smc/secmon_smc_info.cpp b/exosphere/program/source/smc/secmon_smc_info.cpp
+index 88cdeefe0..e5015a7bf 100644
+--- a/exosphere/program/source/smc/secmon_smc_info.cpp
++++ b/exosphere/program/source/smc/secmon_smc_info.cpp
+@@ -346,6 +346,9 @@ namespace ams::secmon::smc {
+                         return SmcResult::Busy;
+                     }
+                     break;
++                case ConfigItem::ExosphereForce40MbApplet:
++                    args.r[1] = GetSecmonConfiguration().Is40MbAppletForced();
++                    break;
+                 default:
+                     return SmcResult::InvalidArgument;
+             }
+diff --git a/exosphere/program/source/smc/secmon_smc_info.hpp b/exosphere/program/source/smc/secmon_smc_info.hpp
+index 605bbf333..4692f30fc 100644
+--- a/exosphere/program/source/smc/secmon_smc_info.hpp
++++ b/exosphere/program/source/smc/secmon_smc_info.hpp
+@@ -53,6 +53,7 @@ namespace ams::secmon::smc {
+         ExosphereForceEnableUsb30      = 65010,
+         ExosphereSupportedHosVersion   = 65011,
+         ExosphereApproximateApiVersion = 65012,
++        ExosphereForce40MbApplet       = 65013,
+     };
+ 
+     SmcResult SmcGetConfigUser(SmcArguments &args);
+diff --git a/fusee/program/source/fusee_setup_horizon.cpp b/fusee/program/source/fusee_setup_horizon.cpp
+index f5ec03ce3..1340f3599 100644
+--- a/fusee/program/source/fusee_setup_horizon.cpp
++++ b/fusee/program/source/fusee_setup_horizon.cpp
+@@ -590,21 +590,26 @@ namespace ams::nxboot {
+                 }
+             }
+ 
+-            /* Parse usb setting from system_settings.ini */
++            /* Parse fields from system_settings.ini */
+             {
+                 IniSectionList sections;
+                 if (ParseIniSafe(sections, "sdmc:/atmosphere/config/system_settings.ini")) {
+                     for (const auto &section : sections) {
+-                        /* We only care about the [usb] section. */
+-                        if (std::strcmp(section.name, "usb")) {
+-                            continue;
+-                        }
+-
+-                        /* Handle individual fields. */
+-                        for (const auto &entry : section.kv_list) {
+-                            if (std::strcmp(entry.key, "usb30_force_enabled") == 0) {
+-                                if (std::strcmp(entry.value, "u8!0x1") == 0) {
+-                                    storage_ctx.flags[0] |= secmon::SecureMonitorConfigurationFlag_ForceEnableUsb30;
++                        /* Handle individual sections. */
++                        if (std::strcmp(section.name, "atmosphere") == 0) {
++                            for (const auto &entry : section.kv_list) {
++                                if (std::strcmp(entry.key, "force_40mb_applet") == 0) {
++                                    if (std::strcmp(entry.value, "u8!0x1") == 0 || std::strcmp(entry.value, "1") == 0) {
++                                        storage_ctx.flags[0] |= secmon::SecureMonitorConfigurationFlag_Force40MbApplet;
++                                    }
++                                }
++                            }
++                        } else if (std::strcmp(section.name, "usb") == 0) {
++                            for (const auto &entry : section.kv_list) {
++                                if (std::strcmp(entry.key, "usb30_force_enabled") == 0) {
++                                    if (std::strcmp(entry.value, "u8!0x1") == 0) {
++                                        storage_ctx.flags[0] |= secmon::SecureMonitorConfigurationFlag_ForceEnableUsb30;
++                                    }
+                                 }
+                             }
+                         }
+diff --git a/libraries/libexosphere/include/exosphere/secmon/secmon_monitor_context.hpp b/libraries/libexosphere/include/exosphere/secmon/secmon_monitor_context.hpp
+index 28517ea74..fc4747eaa 100644
+--- a/libraries/libexosphere/include/exosphere/secmon/secmon_monitor_context.hpp
++++ b/libraries/libexosphere/include/exosphere/secmon/secmon_monitor_context.hpp
+@@ -31,6 +31,7 @@ namespace ams::secmon {
+         SecureMonitorConfigurationFlag_AllowWritingToCalibrationBinarySysmmc  = (1u << 6),
+         SecureMonitorConfigurationFlag_ForceEnableUsb30                       = (1u << 7),
+         SecureMonitorConfigurationFlag_BootConfigMemoryModeEnabled            = (1u << 8),
++        SecureMonitorConfigurationFlag_Force40MbApplet                        = (1u << 9),
+ 
+         SecureMonitorConfigurationFlag_Default = SecureMonitorConfigurationFlag_IsDevelopmentFunctionEnabledForKernel,
+     };
+@@ -105,6 +106,7 @@ namespace ams::secmon {
+         constexpr bool AllowWritingToCalibrationBinarySysmmc()  const { return (this->flags[0] & SecureMonitorConfigurationFlag_AllowWritingToCalibrationBinarySysmmc)  != 0; }
+         constexpr bool IsUsb30ForceEnabled()                    const { return (this->flags[0] & SecureMonitorConfigurationFlag_ForceEnableUsb30)                       != 0; }
+         constexpr bool IsBootConfigMemoryModeEnabled()          const { return (this->flags[0] & SecureMonitorConfigurationFlag_BootConfigMemoryModeEnabled)            != 0; }
++        constexpr bool Is40MbAppletForced()                     const { return (this->flags[0] & SecureMonitorConfigurationFlag_Force40MbApplet)                        != 0; }
+ 
+         constexpr bool IsDevelopmentFunctionEnabled(bool for_kern) const { return for_kern ? this->IsDevelopmentFunctionEnabledForKernel() : this->IsDevelopmentFunctionEnabledForUser(); }
+     };
+diff --git a/libraries/libmesosphere/source/board/nintendo/nx/kern_k_system_control.cpp b/libraries/libmesosphere/source/board/nintendo/nx/kern_k_system_control.cpp
+index 1f6c1c7c4..963880d8b 100644
+--- a/libraries/libmesosphere/source/board/nintendo/nx/kern_k_system_control.cpp
++++ b/libraries/libmesosphere/source/board/nintendo/nx/kern_k_system_control.cpp
+@@ -98,6 +98,12 @@ namespace ams::kern::board::nintendo::nx {
+             return (table[(offset / sizeof(u32)) / BITSIZEOF(u8)] & (1u << ((offset / sizeof(u32)) % BITSIZEOF(u8)))) != 0;
+         }
+ 
++        ALWAYS_INLINE bool Is40MbAppletForced() {
++            u64 value = 0;
++            smc::init::GetConfig(&value, 1, smc::ConfigItem::ExosphereForce40MbApplet);
++            return value != 0;
++        }
++
+         /* TODO: Generate this from a list of register names (see similar logic in exosphere)? */
+         constexpr inline const u8 McKernelRegisterWhitelist[(PageSize / sizeof(u32)) / BITSIZEOF(u8)] = {
+             0x9F, 0x31, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,
+@@ -363,15 +369,21 @@ namespace ams::kern::board::nintendo::nx {
+         /* Return (possibly) adjusted size. */
+         /* NOTE: On 20.0.0+ (and even more-so 21.0.0+) the browser requires much more memory in the applet pool in order to function. */
+         /* Thus, we have to reduce our extra system memory size by 26 MB to compensate. */
+-        if (kern::GetTargetFirmware() >= ams::TargetFirmware_21_0_0) {
+-            constexpr size_t ExtraSystemMemoryForAtmosphere_21_0_0 = 7_MB;
+-            return base_pool_size - ExtraSystemMemoryForAtmosphere_21_0_0 - KTraceBufferSize;
+-        } else if (kern::GetTargetFirmware() >= ams::TargetFirmware_20_0_0) {
+-            constexpr size_t ExtraSystemMemoryForAtmosphere_20_0_0 = 14_MB;
+-            return base_pool_size - ExtraSystemMemoryForAtmosphere_20_0_0 - KTraceBufferSize;
+-        } else {
++
++        if (Is40MbAppletForced()) {
+             constexpr size_t ExtraSystemMemoryForAtmosphere = 40_MB;
+             return base_pool_size - ExtraSystemMemoryForAtmosphere - KTraceBufferSize;
++        } else {
++            if (kern::GetTargetFirmware() >= ams::TargetFirmware_21_0_0) {
++                constexpr size_t ExtraSystemMemoryForAtmosphere_21_0_0 = 7_MB;
++                return base_pool_size - ExtraSystemMemoryForAtmosphere_21_0_0 - KTraceBufferSize;
++            } else if (kern::GetTargetFirmware() >= ams::TargetFirmware_20_0_0) {
++                constexpr size_t ExtraSystemMemoryForAtmosphere_20_0_0 = 14_MB;
++                return base_pool_size - ExtraSystemMemoryForAtmosphere_20_0_0 - KTraceBufferSize;
++            } else {
++                constexpr size_t ExtraSystemMemoryForAtmosphere = 40_MB;
++                return base_pool_size - ExtraSystemMemoryForAtmosphere - KTraceBufferSize;
++            }
+         }
+     }
+ 
+diff --git a/libraries/libmesosphere/source/board/nintendo/nx/kern_secure_monitor.hpp b/libraries/libmesosphere/source/board/nintendo/nx/kern_secure_monitor.hpp
+index 6ee325aa3..eff9b8e6f 100644
+--- a/libraries/libmesosphere/source/board/nintendo/nx/kern_secure_monitor.hpp
++++ b/libraries/libmesosphere/source/board/nintendo/nx/kern_secure_monitor.hpp
+@@ -73,6 +73,8 @@ namespace ams::kern::board::nintendo::nx::smc {
+         ExosphereLogConfiguration    = 65009,
+         ExosphereForceEnableUsb30    = 65010,
+         ExosphereSupportedHosVersion = 65011,
++        ExosphereApproximateApiVersion = 65012,
++        ExosphereForce40MbApplet       = 65013,
+     };
+ 
+     enum class SmcResult {
+diff --git a/libraries/libstratosphere/include/stratosphere/spl/spl_types.hpp b/libraries/libstratosphere/include/stratosphere/spl/spl_types.hpp
+index 11c80ad48..448e01edf 100644
+--- a/libraries/libstratosphere/include/stratosphere/spl/spl_types.hpp
++++ b/libraries/libstratosphere/include/stratosphere/spl/spl_types.hpp
+@@ -245,6 +245,7 @@ namespace ams::spl {
+         ExosphereForceEnableUsb30      = 65010,
+         ExosphereSupportedHosVersion   = 65011,
+         ExosphereApproximateApiVersion = 65012, /* NOTE: Internal use only. */
++        ExosphereForce40MbApplet       = 65013,
+     };
+ 
+ }
+@@ -262,4 +263,5 @@ constexpr inline SplConfigItem SplConfigItem_ExosphereEmummcType       = static_
+ constexpr inline SplConfigItem SplConfigItem_ExospherePayloadAddress   = static_cast<SplConfigItem>(65008);
+ constexpr inline SplConfigItem SplConfigItem_ExosphereLogConfiguration = static_cast<SplConfigItem>(65009);
+ constexpr inline SplConfigItem SplConfigItem_ExosphereForceEnableUsb30 = static_cast<SplConfigItem>(65010);
++constexpr inline SplConfigItem SplConfigItem_ExosphereForce40MbApplet  = static_cast<SplConfigItem>(65013);
+ #endif
+diff --git a/stratosphere/ams_mitm/source/set_mitm/setsys_mitm_service.cpp b/stratosphere/ams_mitm/source/set_mitm/setsys_mitm_service.cpp
+index 67d508bb2..9290cf948 100644
+--- a/stratosphere/ams_mitm/source/set_mitm/setsys_mitm_service.cpp
++++ b/stratosphere/ams_mitm/source/set_mitm/setsys_mitm_service.cpp
+@@ -63,12 +63,27 @@ namespace ams::mitm::settings {
+                 const auto api_info = exosphere::GetApiInfo();
+                 const char emummc_char = emummc::IsActive() ? 'E' : 'S';
+ 
++                u8 force_40mb = 0;
++                settings::fwdbg::GetSettingsItemValue(std::addressof(force_40mb), sizeof(force_40mb), "atmosphere", "force_40mb_applet");
++
++                char dynamic_git_rev[32];
++                if (force_40mb != 0) {
++                    /* If ATMOSPHERE_GIT_REVISION is "KEF-xxx", convert it to "Kxxx-40MB" to save space. */
++                    if (std::strncmp(ATMOSPHERE_GIT_REVISION, "KEF-", 4) == 0) {
++                        util::SNPrintf(dynamic_git_rev, sizeof(dynamic_git_rev), "K%s-40MB", ATMOSPHERE_GIT_REVISION + 4);
++                    } else {
++                        util::SNPrintf(dynamic_git_rev, sizeof(dynamic_git_rev), "%s-40MB", ATMOSPHERE_GIT_REVISION);
++                    }
++                } else {
++                    util::SNPrintf(dynamic_git_rev, sizeof(dynamic_git_rev), "%s", ATMOSPHERE_GIT_REVISION);
++                }
++
+                 /* GCC complains about the following snprintf possibly truncating, but this is not a problem and has been carefully accounted for. */
+                 #pragma GCC diagnostic push
+                 #pragma GCC diagnostic ignored "-Wformat-truncation"
+                 {
+                     char display_version[sizeof(g_ams_firmware_version.display_version)];
+-                    std::snprintf(display_version, sizeof(display_version), "%s|%s-%u.%u.%u|%c", g_ams_firmware_version.display_version, ATMOSPHERE_GIT_REVISION, api_info.GetMajorVersion(), api_info.GetMinorVersion(), api_info.GetMicroVersion(), emummc_char);
++                    std::snprintf(display_version, sizeof(display_version), "%s|%s-%u.%u.%u|%c", g_ams_firmware_version.display_version, dynamic_git_rev, api_info.GetMajorVersion(), api_info.GetMinorVersion(), api_info.GetMicroVersion(), emummc_char);
+                     
+                     std::memcpy(g_ams_firmware_version.display_version, display_version, sizeof(display_version));
+                 }
+-- 
+2.53.0.windows.1
+
