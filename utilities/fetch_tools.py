@@ -686,7 +686,7 @@ def copy_hekate_payload(env_vars):
 
     targets = [
         os.path.join(kef_8gb_dir, "bootloader", "update.bin"),
-        os.path.join(kef_8gb_dir, "atmosphere", "reboot_payload.bin"),
+        # os.path.join(kef_8gb_dir, "atmosphere", "reboot_payload.bin"),
     ]
     for dest in targets:
         os.makedirs(os.path.dirname(dest), exist_ok=True)
