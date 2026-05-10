@@ -1,0 +1,35 @@
+From 37a62995f92cc2ceb1df278517a270628691079c Mon Sep 17 00:00:00 2001
+From: rashevskyv <rashevsky.v@gmail.com>
+Date: Tue, 14 Apr 2026 15:27:19 +0300
+Subject: [PATCH] KEFIR: Revert cpu tick differential for old homebrew
+ compatibility
+
+This reverts commit e36051359c2d9ff9711bb39314a41fb6b0f39ac8.
+
+Reverting the cpu tick differential change to maintain compatibility with
+older homebrew applications that expect the original TLS structure.
+---
+ libraries/libmesosphere/source/kern_k_scheduler.cpp | 8 +-------
+ 1 file changed, 1 insertion(+), 7 deletions(-)
+
+diff --git a/libraries/libmesosphere/source/kern_k_scheduler.cpp b/libraries/libmesosphere/source/kern_k_scheduler.cpp
+index e39eab8c9..d5dfbfcef 100644
+--- a/libraries/libmesosphere/source/kern_k_scheduler.cpp
++++ b/libraries/libmesosphere/source/kern_k_scheduler.cpp
+@@ -270,13 +270,7 @@ namespace ams::kern {
+         m_current_thread = next_thread;
+
+         /* Set the new Thread Local region. */
+-        const auto tls_address = GetInteger(next_thread->GetThreadLocalRegionAddress());
+-        cpu::SwitchThreadLocalRegion(tls_address);
+-
+-        /* Update the thread's cpu time differential in TLS, if relevant. */
+-        if (tls_address != 0) {
+-            static_cast<ams::svc::ThreadLocalRegion *>(next_thread->GetThreadLocalRegionHeapAddress())->thread_cpu_time = next_thread->GetCpuTime() - cur_tick;
+-        }
++        cpu::SwitchThreadLocalRegion(GetInteger(next_thread->GetThreadLocalRegionAddress()));
+     }
+
+     void KScheduler::ClearPreviousThread(KThread *thread) {
+-- 
+2.52.0.windows.1

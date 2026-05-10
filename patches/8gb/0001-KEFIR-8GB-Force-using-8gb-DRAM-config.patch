@@ -1,12 +1,13 @@
-From c78535a3cc3f00172a59425cb1f38d49508b7a09 Mon Sep 17 00:00:00 2001
+From 4b0ed4c4e06f3d721a9944aa84968d9d99b7b382 Mon Sep 17 00:00:00 2001
 From: rashevskyv <rashevsky.v@gmail.com>
-Date: Mon, 13 Apr 2026 14:09:03 +0300
-Subject: [PATCH] KEFIR 8GB: Force using 8gb DRAM config
+Date: Sat, 9 May 2026 19:30:50 +0300
+Subject: [PATCH] KEFIR: 8GB Force using 8gb DRAM config
 
 ---
- .../libexosphere/include/exosphere/pkg1/pkg1_boot_config.hpp    | 2 +-
- libraries/libexosphere/source/fuse/fuse_api.cpp                 | 2 +-
- 2 files changed, 2 insertions(+), 2 deletions(-)
+ .../include/exosphere/pkg1/pkg1_boot_config.hpp     |  2 +-
+ libraries/libexosphere/source/fuse/fuse_api.cpp     |  2 +-
+ .../source/set_mitm/setsys_mitm_service.cpp         | 13 ++++++++-----
+ 3 files changed, 10 insertions(+), 7 deletions(-)
 
 diff --git a/libraries/libexosphere/include/exosphere/pkg1/pkg1_boot_config.hpp b/libraries/libexosphere/include/exosphere/pkg1/pkg1_boot_config.hpp
 index b61fb7e07..0b5708851 100644
@@ -34,6 +35,31 @@ index ee34041a5..4c7b9acac 100644
      }
  
      HardwareType GetHardwareType() {
+diff --git a/stratosphere/ams_mitm/source/set_mitm/setsys_mitm_service.cpp b/stratosphere/ams_mitm/source/set_mitm/setsys_mitm_service.cpp
+index 9290cf948..563b0d37b 100644
+--- a/stratosphere/ams_mitm/source/set_mitm/setsys_mitm_service.cpp
++++ b/stratosphere/ams_mitm/source/set_mitm/setsys_mitm_service.cpp
+@@ -68,12 +68,15 @@ namespace ams::mitm::settings {
+ 
+                 char dynamic_git_rev[32];
+                 if (force_40mb != 0) {
+-                    /* If ATMOSPHERE_GIT_REVISION is "KEF-xxx", convert it to "Kxxx-40MB" to save space. */
+-                    if (std::strncmp(ATMOSPHERE_GIT_REVISION, "KEF-", 4) == 0) {
+-                        util::SNPrintf(dynamic_git_rev, sizeof(dynamic_git_rev), "K%s-40MB", ATMOSPHERE_GIT_REVISION + 4);
+-                    } else {
+-                        util::SNPrintf(dynamic_git_rev, sizeof(dynamic_git_rev), "%s-40MB", ATMOSPHERE_GIT_REVISION);
++                    /* 8GB variant: strip "-8GB" suffix and combine 8G+40MB markers. */
++                    char base_rev[32];
++                    util::SNPrintf(base_rev, sizeof(base_rev), "%s", ATMOSPHERE_GIT_REVISION);
++                    /* Remove trailing "-8GB" if present. */
++                    const size_t len = std::strlen(base_rev);
++                    if (len >= 4 && std::strcmp(base_rev + len - 4, "-8GB") == 0) {
++                        base_rev[len - 4] = '\0';
+                     }
++                    util::SNPrintf(dynamic_git_rev, sizeof(dynamic_git_rev), "%s8G40", base_rev);
+                 } else {
+                     util::SNPrintf(dynamic_git_rev, sizeof(dynamic_git_rev), "%s", ATMOSPHERE_GIT_REVISION);
+                 }
 -- 
 2.53.0.windows.1
 

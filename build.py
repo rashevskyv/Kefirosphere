@@ -494,26 +494,15 @@ def clear_original_state():
 
 
 def reset_atmosphere():
-    """Reset Atmosphere to clean state and remove any leftover variant branches.
+    """Reset Atmosphere to clean upstream state and remove any leftover variant branches.
 
-    Returns the original HEAD commit before any reset (for later restoration).
-    Uses saved state file if available, otherwise detects clean upstream state.
+    Fetches from origin and resets to origin/master. This reliably handles
+    any leftover Kefir commits, interrupted builds, or dirty state.
     """
     # Try to load previously saved original state
     saved_branch, saved_head = load_original_state()
 
-    # Save current state BEFORE any modifications (if not already saved)
-    if not saved_head:
-        try:
-            orig_branch = git_out("branch", "--show-current")
-            orig_head = git_out("rev-parse", "HEAD")
-        except subprocess.CalledProcessError:
-            # Fallback if commands fail
-            orig_branch = "master"
-            orig_head = None
-    else:
-        orig_branch = saved_branch
-        orig_head = saved_head
+    orig_branch = saved_branch or "master"
 
     # Check for leftover variant branches from interrupted builds
     branches_output = git_out("branch", "--list")
@@ -533,54 +522,30 @@ def reset_atmosphere():
             log.info("Deleting leftover branch: %s", branch)
             git("branch", "-D", branch, check=False)
 
-    # Check for uncommitted changes or applied patches
+    # Discard any uncommitted changes
     res = run(["git", "status", "--porcelain"], cwd=ATMOSPHERE_DIR, check=False)
     if res.stdout.strip():
-        log.warning("Atmosphere has local changes (possibly from interrupted build) — resetting…")
+        log.warning("Atmosphere has local changes — resetting…")
         git("reset", "--hard", "HEAD")
         git("clean", "-fd", check=False)
 
-    # Check if HEAD has Kefir patches (commits with "KEFIR:" in message)
-    # Only do this if we don't have a saved state
-    if not saved_head:
-        try:
-            recent_commits = git_out("log", "--oneline", "-10")
-            if "KEFIR:" in recent_commits:
-                log.warning("Found Kefir patches in commit history — finding original upstream HEAD")
-                # Find first commit that's NOT a Kefir patch
-                commits = git_out("log", "--oneline", "-100").split("\n")
-                for commit_line in commits:
-                    commit_hash = commit_line.split()[0]
-                    commit_msg = git_out("log", "-1", "--format=%s", commit_hash)
-                    if "KEFIR:" not in commit_msg:
-                        log.info("Found original upstream commit: %s", commit_line[:60])
-                        git("reset", "--hard", commit_hash)
-                        git("clean", "-fd", check=False)
-                        # Update orig_head to this clean state
-                        orig_head = commit_hash
-                        log.info("Reset to clean upstream state")
-                        break
-        except subprocess.CalledProcessError as e:
-            log.warning("Could not check for Kefir patches: %s", e)
-
-    if not orig_head:
-        orig_head = git_out("rev-parse", "HEAD")
-
-    # Pull latest changes from upstream (after ensuring we're on clean state)
-    log.info("Pulling latest changes from upstream...")
+    # Fetch latest from upstream and reset to origin/master
+    log.info("Fetching latest from upstream…")
     try:
-        result = git("pull", "--ff-only", check=False)
-        if result.returncode == 0:
-            log.info("Atmosphere updated to latest upstream")
-            # Update HEAD after pull
-            new_head = git_out("rev-parse", "HEAD")
-            if new_head != orig_head:
-                log.info("HEAD changed after pull: %s -> %s", orig_head[:8], new_head[:8])
-                orig_head = new_head
-        else:
-            log.warning("git pull failed, continuing with current HEAD")
+        git("fetch", "origin")
+        remote_head = git_out("rev-parse", "origin/master")
+        local_head = git_out("rev-parse", "HEAD")
+
+        if local_head != remote_head:
+            log.info("Local HEAD (%s) differs from origin/master (%s) — resetting",
+                     local_head[:8], remote_head[:8])
+            git("reset", "--hard", "origin/master")
+
+        orig_head = git_out("rev-parse", "HEAD")
+        log.info("Atmosphere synced to origin/master: %s", orig_head[:8])
     except subprocess.CalledProcessError as e:
-        log.warning("Could not pull updates: %s", e)
+        log.warning("Could not fetch from origin: %s — using current HEAD", e)
+        orig_head = saved_head or git_out("rev-parse", "HEAD")
 
     # Save the original clean state for future interrupted builds
     if not saved_head:
@@ -684,7 +649,7 @@ def generate_splash_inc(env: dict):
 # Cleanup
 # ─────────────────────────────────────────────────────────────────────────────
 
-VARIANT_BRANCHES = ["8gb_DRAM", "oc", "40mb"]
+VARIANT_BRANCHES = ["8gb_DRAM", "oc"]
 
 
 def cleanup(orig_branch, orig_head):
@@ -788,8 +753,8 @@ def build(env, patches_to_apply, adv_flag):
     if "core" in patches_to_apply: patch_dirs.append(PATCHES_DIR / "core")
     if "8gb" in patches_to_apply: patch_dirs.append(PATCHES_DIR / "8gb")
     if "oc" in patches_to_apply: patch_dirs.append(PATCHES_DIR / "oc")
-    if "40mb" in patches_to_apply: patch_dirs.append(PATCHES_DIR / "40mb")
     
+
     all_patches = []
     for d in patch_dirs:
         if d.exists():
@@ -843,7 +808,7 @@ def build(env, patches_to_apply, adv_flag):
             generate_splash_inc(env)
 
         # Step 2 — variant branches
-        for branch_name, patch_subdir in [("8gb_DRAM", "8gb"), ("oc", "oc"), ("40mb", "40mb")]:
+        for branch_name, patch_subdir in [("8gb_DRAM", "8gb"), ("oc", "oc")]:
             if patch_subdir not in patches_to_apply:
                 continue
             prog.set(phase=f"Step 2/3 — Branch: {branch_name}",
@@ -876,8 +841,6 @@ def build(env, patches_to_apply, adv_flag):
                     run_make(["make", "8gb_DRAM", "SKIP_FETCH=1", f"-j{NPROCS}"] + make_vars, progress=prog)
                 if "oc" in patches_to_apply:
                     run_make(["make", "oc", f"-j{NPROCS}"] + make_vars, progress=prog)
-                if "40mb" in patches_to_apply:
-                    run_make(["make", "40mb", f"-j{NPROCS}"] + make_vars, progress=prog)
             else:
                 # Without core patches, we just build pure atmosphere
                 run_make(["make", "clean", f"-j{NPROCS}"] + make_vars, progress=prog)
@@ -918,7 +881,7 @@ def build(env, patches_to_apply, adv_flag):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Kefirosphere Build Script")
-    parser.add_argument("--patches", nargs="*", default=["core", "8gb", "oc", "40mb"],
+    parser.add_argument("--patches", nargs="*", default=["core", "8gb", "oc"],
                         help="Which patches to apply and build. E.g. --patches core 8gb. Pass empty (e.g. without arguments if using a wrapper) for clean Atmosphere.")
     parser.add_argument("--adv", action="store_true", help="Advanced options. Interactive TUI patch selection.")
     return parser.parse_args()
