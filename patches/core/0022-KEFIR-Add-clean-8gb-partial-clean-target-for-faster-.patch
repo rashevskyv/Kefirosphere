@@ -1,4 +1,4 @@
-From 8142165adaa47f518628828ce188250113a33f77 Mon Sep 17 00:00:00 2001
+﻿From 8142165adaa47f518628828ce188250113a33f77 Mon Sep 17 00:00:00 2001
 From: rashevskyv <rashevsky.v@gmail.com>
 Date: Mon, 11 May 2026 19:40:28 +0300
 Subject: [PATCH] KEFIR: Add clean-8gb partial clean target for faster 8GB
