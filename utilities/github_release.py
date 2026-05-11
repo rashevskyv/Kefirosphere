@@ -422,7 +422,9 @@ def deploy(cfg: dict):
     # ── Gather versions ───────────────────────────────────────────────────────
     ver        = get_kefir_version(kefir_root)
     atmo_live  = get_atmosphere_version()
-    atmo_state = read_state().get("ATMOSPHERE_LATEST_VERSION")
+    state_data = read_state()
+    atmo_state = state_data.get("ATMOSPHERE_LATEST_VERSION")
+    force_new  = state_data.get("force_new_release", False)
     hekate_ver = get_hekate_version()
 
     print(f"\n  Kefir version    : {ver}")
@@ -432,7 +434,10 @@ def deploy(cfg: dict):
 
     # ── Determine release mode ────────────────────────────────────────────────
     atmo_changed = (atmo_live is not None) and (atmo_live != atmo_state)
-    if atmo_changed:
+    if force_new:
+        mode = "new"
+        print(f"\n  [!] Force new release flag is TRUE: CREATE new release\n")
+    elif atmo_changed:
         mode = "new"
         print(f"\n  [!] Atmosphere updated ({atmo_state} -> {atmo_live}): CREATE new release\n")
     else:
@@ -506,9 +511,15 @@ def deploy(cfg: dict):
             body_file.unlink()
 
     # ── Update state ──────────────────────────────────────────────────────────
+    updates = {}
     if atmo_live:
-        write_state({"ATMOSPHERE_LATEST_VERSION": atmo_live})
-    print(f"\n  build_state.json updated (ATMOSPHERE_LATEST_VERSION = {atmo_live})\n")
+        updates["ATMOSPHERE_LATEST_VERSION"] = atmo_live
+    if force_new:
+        updates["force_new_release"] = False
+        
+    if updates:
+        write_state(updates)
+        print(f"\n  build_state.json updated ({updates})\n")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

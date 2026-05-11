@@ -24,6 +24,7 @@ import sys
 import re
 import json
 import time
+import urllib.request
 from pathlib import Path
 from typing import List, Tuple
 
@@ -375,7 +376,21 @@ def update_changelog(cfg: dict):
         print("  Run --collect-changelogs first to create it.")
         sys.exit(1)
 
-    # Parse current changelog
+    # Translate changelog (UKR -> ENG) before merging
+    print("\n" + "=" * 60)
+    print("  Syncing ENG translation in changelog")
+    print("=" * 60)
+
+    # Parse current changelog to discover versions
+    current_content = current_file.read_text(encoding="utf-8")
+    current_ukr_match = re.search(r"#### \*\*UKR\*\*(.*?)(?=#### \*\*ENG\*\*|$)", current_content, re.DOTALL)
+    current_ukr_pre = current_ukr_match.group(1).strip() if current_ukr_match else ""
+    _, pre_blocks = parse_changelog_section(current_ukr_pre)
+    for ver, _ in pre_blocks:
+        check_and_force_sync_eng_block(str(current_file), str(ver))
+    check_and_translate_preamble(str(current_file))
+
+    # Re-read current changelog (now with translated ENG)
     current_content = current_file.read_text(encoding="utf-8")
     current_ukr_match = re.search(r"#### \*\*UKR\*\*(.*?)(?=#### \*\*ENG\*\*|$)", current_content, re.DOTALL)
     current_eng_match = re.search(r"#### \*\*ENG\*\*(.*?)(?=$)", current_content, re.DOTALL)
@@ -402,10 +417,12 @@ def update_changelog(cfg: dict):
     existing_eng_versions = {ver for ver, _ in full_eng_blocks}
 
     new_ukr_count = 0
+    new_ukr_versions = []
     for ver, text in current_ukr_blocks:
         if ver not in existing_ukr_versions:
             full_ukr_blocks.append((ver, text))
             new_ukr_count += 1
+            new_ukr_versions.append(str(ver))
             print(f"  [UKR] Added version {ver}")
 
     new_eng_count = 0
@@ -500,6 +517,201 @@ ____
     print(f"  ✓ Sorted {len(ukr_blocks)} UKR versions, {len(eng_blocks)} ENG versions")
     print(f"  ✓ Saved to: {full_file}")
     print("=" * 60)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OpenAI translation helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_openai_key() -> str:
+    """Read OPENAI_API_KEY from .env file."""
+    if not ENV_FILE.exists():
+        return ""
+    for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line.startswith("OPENAI_API_KEY="):
+            return line.split("=", 1)[1].strip().strip("\"'")
+    return ""
+
+
+def translate_block_with_openai(ukr_block_text: str) -> str:
+    """Translate a UKR changelog block to English using OpenAI."""
+    api_key = _get_openai_key()
+    if not api_key or not ukr_block_text.strip():
+        return ""
+
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+    prompt = (
+        "Translate the following changelog block into English.\n"
+        "Rules:\n"
+        "- Output ONLY the translated text.\n"
+        "- Preserve all markdown formatting, including asterisks, list markers, and brackets.\n"
+        "- Do NOT translate tool names (e.g., 'Atmosphere', 'Mission Control').\n"
+        "- Translate 'Оновлено' to 'Updated', 'Додано' to 'Added'.\n\n"
+        f"Block:\n{ukr_block_text}"
+    )
+    def try_request(url, model, timeout):
+        data = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.2
+        }
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(data, ensure_ascii=False).encode("utf-8"),
+            headers=headers,
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp_body = json.loads(resp.read().decode("utf-8"))
+            return resp_body["choices"][0]["message"]["content"].strip()
+
+    try:
+        return try_request("http://localhost:20128/v1/chat/completions", "kr/claude-sonnet-4.5", 15)
+    except Exception as e:
+        print(f"[CHANGELOG] Local AI translation failed ({e}), falling back to OpenAI...", file=sys.stderr)
+        try:
+            return try_request("https://api.openai.com/v1/chat/completions", "gpt-4o-mini", 60)
+        except Exception as e2:
+            print(f"[ERROR] AI block translation failed: {e2}", file=sys.stderr)
+            return ""
+
+
+def _extract_tool_names_from_block(block_text: str) -> list:
+    """Return a sorted list of tool names found in bullet lines of a changelog block."""
+    names = []
+    for line in block_text.split("\n"):
+        line = line.strip()
+        if not line.startswith("*"):
+            continue
+        m = re.search(r"\[([^\]]+)\]\(", line)
+        if m:
+            label = m.group(1)
+            parts = label.rsplit(" ", 1)
+            if len(parts) == 2 and re.match(r"^[vV]?[\d]", parts[1]):
+                names.append(parts[0].strip().lower())
+            else:
+                names.append(label.strip().lower())
+    return sorted(names)
+
+
+def check_and_translate_preamble(changelog_path: str):
+    """Translate ENG preamble from UKR if ENG preamble is shorter.
+
+    Preamble = text between '#### **UKR**' / '#### **ENG**' and the first **XXX** version marker.
+    """
+    path = Path(changelog_path)
+    if not path.exists():
+        return
+
+    content = path.read_text(encoding="utf-8")
+    parts = content.split("#### **ENG**")
+    if len(parts) != 2:
+        return
+
+    ukr_part, eng_part = parts[0], "#### **ENG**" + parts[1]
+
+    ukr_header_match = re.search(r"####\s*\*\*UKR\*\*\s*\n(.*?)(?=\*\*\d+\*\*)", ukr_part, re.DOTALL)
+    ukr_preamble = ukr_header_match.group(1).strip() if ukr_header_match else ""
+
+    eng_header_match = re.search(r"####\s*\*\*ENG\*\*\s*\n(.*?)(?=\*\*\d+\*\*)", eng_part, re.DOTALL)
+    eng_preamble = eng_header_match.group(1).strip() if eng_header_match else ""
+
+    ukr_lines = [l for l in ukr_preamble.split("\n") if l.strip()]
+    eng_lines = [l for l in eng_preamble.split("\n") if l.strip()]
+
+    if len(eng_lines) >= len(ukr_lines):
+        print(f"[CHANGELOG] Preamble OK (UKR: {len(ukr_lines)} lines, ENG: {len(eng_lines)} lines)")
+        return
+
+    print(f"[CHANGELOG] Preamble OUT OF SYNC (UKR: {len(ukr_lines)} lines, ENG: {len(eng_lines)} lines). Translating...")
+
+    if not ukr_preamble:
+        print("[CHANGELOG] UKR preamble is empty, nothing to translate.")
+        return
+
+    translated = translate_block_with_openai(ukr_preamble)
+    if not translated:
+        print("[CHANGELOG] Preamble translation returned empty result, skipping update.", file=sys.stderr)
+        return
+
+    if eng_header_match:
+        first_ver_match = re.search(r"\*\*\d+\*\*", eng_part)
+        if first_ver_match:
+            new_eng = eng_part[:eng_header_match.start(1)] + translated + "\n\n" + eng_part[first_ver_match.start():]
+        else:
+            new_eng = eng_part[:eng_header_match.start(1)] + translated + "\n"
+    else:
+        header_end = eng_part.find("\n")
+        if header_end != -1:
+            new_eng = eng_part[:header_end + 1] + translated + "\n" + eng_part[header_end + 1:]
+        else:
+            new_eng = eng_part + "\n" + translated + "\n"
+
+    path.write_text(ukr_part + new_eng, encoding="utf-8")
+    print("[CHANGELOG] Preamble translated successfully.")
+
+
+def check_and_force_sync_eng_block(changelog_path: str, kefir_ver: str):
+    """Compare UKR and ENG changelog blocks for kefir_ver.
+
+    If tool count or tool names differ, force-translate the UKR block to ENG.
+    """
+    path = Path(changelog_path)
+    if not path.exists():
+        return
+
+    content = path.read_text(encoding="utf-8")
+    parts = content.split("#### **ENG**")
+    if len(parts) != 2:
+        return
+
+    ukr_part, eng_raw = parts[0], "#### **ENG**" + parts[1]
+    ver_marker = f"**{kefir_ver}**"
+    pattern = re.compile(re.escape(ver_marker) + r"(.*?)(?=\*\*[\d]+\*\*|\Z)", re.DOTALL)
+
+    ukr_match = pattern.search(ukr_part)
+    eng_match = pattern.search(eng_raw)
+
+    ukr_block = ukr_match.group(1).strip() if ukr_match else ""
+    eng_block = eng_match.group(1).strip() if eng_match else ""
+
+    ukr_count = len([l for l in ukr_block.split("\n") if l.strip().startswith("*")])
+    eng_count = len([l for l in eng_block.split("\n") if l.strip().startswith("*")])
+
+    ukr_names = _extract_tool_names_from_block(ukr_block)
+    eng_names = _extract_tool_names_from_block(eng_block)
+
+    if ukr_count == eng_count and ukr_names == eng_names:
+        print(f"[CHANGELOG] ENG block for v{kefir_ver} is in sync ({ukr_count} entries). OK.")
+        return
+
+    print(
+        f"[CHANGELOG] ENG block for v{kefir_ver} is OUT OF SYNC "
+        f"(UKR: {ukr_count} entries {ukr_names}, ENG: {eng_count} entries {eng_names}). "
+        f"Forcing translation..."
+    )
+
+    if not ukr_block:
+        print("[CHANGELOG] UKR block is empty, nothing to translate.")
+        return
+
+    translated = translate_block_with_openai(ukr_block)
+    if not translated:
+        print("[CHANGELOG] Translation returned empty result, skipping update.", file=sys.stderr)
+        return
+
+    if eng_match:
+        new_eng = eng_raw[:eng_match.start()] + ver_marker + "\n" + translated + "\n\n" + eng_raw[eng_match.end():]
+    else:
+        first_ver = re.search(r"\*\*\d+\*\*", eng_raw)
+        if first_ver:
+            new_eng = eng_raw[:first_ver.start()] + f"{ver_marker}\n{translated}\n\n" + eng_raw[first_ver.start():]
+        else:
+            new_eng = eng_raw + f"\n{ver_marker}\n{translated}\n"
+
+    path.write_text(ukr_part + new_eng, encoding="utf-8")
+    print(f"[CHANGELOG] ENG block for v{kefir_ver} updated successfully.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

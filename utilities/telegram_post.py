@@ -145,10 +145,8 @@ def md_to_html(text: str) -> str:
     # 2. Monospaced text: `text` or 'text' -> <code>text</code>
     # We use a non-greedy regex to match content inside quotes/backticks
     text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
-    # For single quotes, we only target paths/filenames (usually have / or .)
-    # to avoid mess with possessive apostrophes if any.
-    text = re.sub(r"'([^']*/[^']+)'|'([^']+\.[^']+)'", 
-                  lambda m: f"<code>{m.group(1) or m.group(2)}</code>", text)
+    # For single quotes, we match text enclosed in quotes, avoiding internal apostrophes (like don't or зв'язок)
+    text = re.sub(r"(^|[\s(])'([^']+)'(?=[.,;:!?\s)]|$)", r"\1<code>\2</code>", text)
     
     # 3. Bold: **text** -> <b>text</b>
     # Specifically handle cases like [**Word**] to become [<b>Word</b>]
@@ -219,7 +217,8 @@ def send_to_telegram(token: str, chat_id: str, photo_path: Path, caption: str, f
                 "chat_id": chat_id,
                 "text": chunk,
                 "parse_mode": "HTML",
-                "reply_to_message_id": message_id
+                "reply_to_message_id": message_id,
+                "link_preview_options": json.dumps({"is_disabled": True})
             }
             if thread_id:
                 payload["message_thread_id"] = thread_id
