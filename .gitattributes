@@ -1,0 +1,8 @@
+# Patch files must always use LF line endings to work correctly with `git am` on Linux
+*.patch text eol=lf
+
+# Python scripts - LF
+*.py text eol=lf
+
+# Shell scripts - LF
+*.sh text eol=lf
