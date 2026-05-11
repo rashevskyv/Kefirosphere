@@ -9,14 +9,14 @@ Subject: [PATCH] KEFIR: Add clean-8gb partial clean target for faster 8GB
  1 file changed, 13 insertions(+), 1 deletion(-)
 
 diff --git a/atmosphere.mk b/atmosphere.mk
-index 7d80c94be..1354221c8 100644
 --- a/atmosphere.mk
 +++ b/atmosphere.mk
-@@ -170,4 +170,16 @@ clean:
+@@ -125,4 +125,16 @@ clean:
  $(CURRENT_DIRECTORY)/$(ATMOSPHERE_OUT_DIR) $(CURRENT_DIRECTORY)/$(ATMOSPHERE_BUILD_DIR):
  	@[ -d $@ ] || mkdir -p $@
  
--.PHONY: dist dist-no-debug clean package3 emummc fusee stratosphere mesosphere exosphere troposphere
+-.PHONY: dist-no-debug clean package3 emummc fusee stratosphere mesosphere exosphere
+\ No newline at end of file
 +# Partial clean for 8GB rebuild: only components affected by the 8GB patch.
 +# - libexosphere (fuse_api.cpp, pkg1_boot_config.hpp)
 +# - exosphere (depends on libexosphere)
@@ -29,7 +29,7 @@ index 7d80c94be..1354221c8 100644
 +	$(MAKE) -C $(CURRENT_DIRECTORY)/fusee -f $(CURRENT_DIRECTORY)/fusee/fusee.mk clean ATMOSPHERE_CPU="$(strip $(ATMOSPHERE_BOOT_CPU))"
 +	$(MAKE) -C $(CURRENT_DIRECTORY)/stratosphere/ams_mitm clean
 +
-+.PHONY: dist dist-no-debug clean clean-8gb package3 emummc fusee stratosphere mesosphere exosphere troposphere
++.PHONY: dist-no-debug clean clean-8gb package3 emummc fusee stratosphere mesosphere exosphere
 -- 
 2.53.0.windows.1
 
