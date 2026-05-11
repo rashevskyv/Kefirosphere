@@ -57,9 +57,10 @@ def _log_on():  logging.getLogger().addHandler(_ch)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Hardcoded estimation to avoid 30+ seconds of file traversal.
-# Master branch compilation takes ~4690 files.
+# Master branch compilation: ~4690 files total.
+# With clean-8gb/clean-oc optimization variant builds compile ~1882 files (only changed components).
 # The 3 variant branches (8gb_DRAM, oc, 40mb) compile roughly 1 file each.
-_ESTIMATED_FILES = 4690
+_ESTIMATED_FILES = 1882
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Interactive patch selection
