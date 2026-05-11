@@ -1,23 +1,43 @@
-From 8142165adaa47f518628828ce188250113a33f77 Mon Sep 17 00:00:00 2001
+From e6ca7c1bef4bbac660614ccb92a5930db65ea749 Mon Sep 17 00:00:00 2001
 From: rashevskyv <rashevsky.v@gmail.com>
-Date: Mon, 11 May 2026 19:40:28 +0300
-Subject: [PATCH] KEFIR: Add clean-8gb partial clean target for faster 8GB
- builds
+Date: Mon, 11 May 2026 21:29:48 +0300
+Subject: [PATCH] KEFIR: Add clean-8gb target and use it in 8gb_DRAM build
 
 ---
+ Makefile      |  4 ++--
  atmosphere.mk | 14 +++++++++++++-
- 1 file changed, 13 insertions(+), 1 deletion(-)
+ 2 files changed, 15 insertions(+), 3 deletions(-)
 
+diff --git a/Makefile b/Makefile
+index 5c3160a0e..e8318d0bc 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,4 +1,4 @@
+-ATMOSPHERE_BUILD_CONFIGS :=
++﻿ATMOSPHERE_BUILD_CONFIGS :=
+ KEFIR_ROOT_DIR ?= /mnt/d/git/dev/_kefir
+ 
+ ifndef KEF_VERSION
+@@ -118,7 +118,7 @@ kefir-version:
+ 	@echo "---------------------------------------------------------"
+ 	git checkout 8gb_DRAM
+ 	git merge master --no-edit
+-	$(MAKE) clean -j$(NPROCS)
++	$(MAKE) -f atmosphere.mk clean-8gb
+ 	$(MAKE) -f atmosphere.mk package3 ATMOSPHERE_GIT_REVISION="K$(KEF_VERSION)-8GB" -j$(NPROCS)
+ 	$(MAKE) -C fusee -j$(NPROCS)
+ 	mkdir -p $(KEF_8GB_DIR)/atmosphere/
 diff --git a/atmosphere.mk b/atmosphere.mk
+index c1aee1c14..0f8a95418 100644
 --- a/atmosphere.mk
 +++ b/atmosphere.mk
-@@ -125,4 +125,16 @@ clean:
+@@ -122,4 +122,16 @@ clean:
  $(CURRENT_DIRECTORY)/$(ATMOSPHERE_OUT_DIR) $(CURRENT_DIRECTORY)/$(ATMOSPHERE_BUILD_DIR):
  	@[ -d $@ ] || mkdir -p $@
  
 -.PHONY: dist-no-debug clean package3 emummc fusee stratosphere mesosphere exosphere
 \ No newline at end of file
-+# Partial clean for 8GB rebuild: only components affected by the 8GB patch.
++# Partial clean for 8GB rebuild: only components affected by the 8GB DRAM patch.
 +# - libexosphere (fuse_api.cpp, pkg1_boot_config.hpp)
 +# - exosphere (depends on libexosphere)
 +# - fusee (depends on libexosphere_boot)
@@ -30,6 +50,7 @@ diff --git a/atmosphere.mk b/atmosphere.mk
 +	$(MAKE) -C $(CURRENT_DIRECTORY)/stratosphere/ams_mitm clean
 +
 +.PHONY: dist-no-debug clean clean-8gb package3 emummc fusee stratosphere mesosphere exosphere
+\ No newline at end of file
 -- 
 2.53.0.windows.1
 

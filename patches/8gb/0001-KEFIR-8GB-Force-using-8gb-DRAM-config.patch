@@ -1,4 +1,4 @@
-From 4b0ed4c4e06f3d721a9944aa84968d9d99b7b382 Mon Sep 17 00:00:00 2001
+From e262f37e76ff22b67b346382fc6d76ac8ff811ff Mon Sep 17 00:00:00 2001
 From: rashevskyv <rashevsky.v@gmail.com>
 Date: Sat, 9 May 2026 19:30:50 +0300
 Subject: [PATCH] KEFIR: 8GB Force using 8gb DRAM config
