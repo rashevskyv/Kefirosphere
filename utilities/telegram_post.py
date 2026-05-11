@@ -127,6 +127,8 @@ def parse_localized_changelog(kefir_root: str, version: str):
         else:
             needed_text = section_content.strip()
             
+        # Strip trailing horizontal rules (____ or ----)
+        needed_text = re.sub(r"[\r\n]+[-_]{3,}\s*$", "", needed_text).strip()
         return needed_text
 
     ukr_part = extract_section("UKR")
