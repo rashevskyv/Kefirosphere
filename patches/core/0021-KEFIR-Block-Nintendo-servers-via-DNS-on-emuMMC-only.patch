@@ -1,0 +1,48 @@
+From c62a27e5da285fba46312d43bd39172f1d3198cc Mon Sep 17 00:00:00 2001
+From: rashevskyv <rashevsky.v@gmail.com>
+Date: Mon, 11 May 2026 19:03:47 +0300
+Subject: [PATCH] KEFIR: Block Nintendo servers via DNS on emuMMC only
+
+---
+ .../dns_mitm/dnsmitm_host_redirection.cpp      | 18 ++++++++++++++----
+ 1 file changed, 14 insertions(+), 4 deletions(-)
+
+diff --git a/stratosphere/ams_mitm/source/dns_mitm/dnsmitm_host_redirection.cpp b/stratosphere/ams_mitm/source/dns_mitm/dnsmitm_host_redirection.cpp
+index ea6f1eb09..9750fdd29 100644
+--- a/stratosphere/ams_mitm/source/dns_mitm/dnsmitm_host_redirection.cpp
++++ b/stratosphere/ams_mitm/source/dns_mitm/dnsmitm_host_redirection.cpp
+@@ -64,6 +64,9 @@ namespace ams::mitm::socket::resolver {
+             return 1;
+         }
+ 
++        constexpr const char HardcodedRedirections[] =
++            "127.0.0.1 *nintendo*\n";
++
+         constexpr const char DefaultHostsFile[] =
+             "# Nintendo telemetry servers\n"
+             "127.0.0.1 receive-%.dg.srv.nintendo.net receive-%.er.srv.nintendo.net\n";
+@@ -334,10 +337,17 @@ namespace ams::mitm::socket::resolver {
+             ::fsFileClose(std::addressof(default_file));
+         }
+ 
+-        /* If we should, add the defaults. */
+-        if (add_defaults) {
+-            Log(log_file, "Adding defaults to redirection list.\n");
+-            ParseHostsFile(DefaultHostsFile);
++        /* Apply Nintendo server redirections only when emummc is active.
++           This prevents blocking Nintendo servers on sysmmc. */
++        if (emummc::IsActive()) {
++            Log(log_file, "Adding hardcoded redirections (emummc active).\n");
++            ParseHostsFile(HardcodedRedirections);
++
++            /* If we should, add the defaults (telemetry blocks). */
++            if (add_defaults) {
++                Log(log_file, "Adding defaults to redirection list.\n");
++                ParseHostsFile(DefaultHostsFile);
++            }
+         }
+ 
+         /* Select the hosts file. */
+-- 
+2.53.0.windows.1
+
