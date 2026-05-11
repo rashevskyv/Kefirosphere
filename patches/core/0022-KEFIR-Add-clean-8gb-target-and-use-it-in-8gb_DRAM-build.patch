@@ -1,23 +1,18 @@
-From e6ca7c1bef4bbac660614ccb92a5930db65ea749 Mon Sep 17 00:00:00 2001
+From a79cf159d3e4b5d1c828b1dd9102aec64cf8a453 Mon Sep 17 00:00:00 2001
 From: rashevskyv <rashevsky.v@gmail.com>
 Date: Mon, 11 May 2026 21:29:48 +0300
-Subject: [PATCH] KEFIR: Add clean-8gb target and use it in 8gb_DRAM build
+Subject: [PATCH] KEFIR: Add clean-8gb/clean-oc targets and use them in variant
+ builds
 
 ---
  Makefile      |  4 ++--
- atmosphere.mk | 14 +++++++++++++-
- 2 files changed, 15 insertions(+), 3 deletions(-)
+ atmosphere.mk | 18 +++++++++++++++++-
+ 2 files changed, 19 insertions(+), 3 deletions(-)
 
 diff --git a/Makefile b/Makefile
-index 5c3160a0e..e8318d0bc 100644
+index 5c3160a0e..80c477831 100644
 --- a/Makefile
 +++ b/Makefile
-@@ -1,4 +1,4 @@
--ATMOSPHERE_BUILD_CONFIGS :=
-+﻿ATMOSPHERE_BUILD_CONFIGS :=
- KEFIR_ROOT_DIR ?= /mnt/d/git/dev/_kefir
- 
- ifndef KEF_VERSION
 @@ -118,7 +118,7 @@ kefir-version:
  	@echo "---------------------------------------------------------"
  	git checkout 8gb_DRAM
@@ -27,11 +22,20 @@ index 5c3160a0e..e8318d0bc 100644
  	$(MAKE) -f atmosphere.mk package3 ATMOSPHERE_GIT_REVISION="K$(KEF_VERSION)-8GB" -j$(NPROCS)
  	$(MAKE) -C fusee -j$(NPROCS)
  	mkdir -p $(KEF_8GB_DIR)/atmosphere/
+@@ -136,7 +136,7 @@ oc:
+ 	@echo "---------------------------------------------------------"
+ 	git checkout oc
+ 	git merge master --no-edit
+-	$(MAKE) clean -j$(NPROCS)
++	$(MAKE) -f atmosphere.mk clean-oc
+ 	$(MAKE) -C stratosphere/loader -j$(NPROCS)
+ 	mkdir -p $(KEF_OC_DIR)/atmosphere/kips/
+ 	cp stratosphere/loader/out/nintendo_nx_arm64_armv8a/release/loader.kip $(KEF_OC_DIR)/atmosphere/kips/kefir.kip
 diff --git a/atmosphere.mk b/atmosphere.mk
-index c1aee1c14..0f8a95418 100644
+index c1aee1c14..9fde8b1e9 100644
 --- a/atmosphere.mk
 +++ b/atmosphere.mk
-@@ -122,4 +122,16 @@ clean:
+@@ -122,4 +122,20 @@ clean:
  $(CURRENT_DIRECTORY)/$(ATMOSPHERE_OUT_DIR) $(CURRENT_DIRECTORY)/$(ATMOSPHERE_BUILD_DIR):
  	@[ -d $@ ] || mkdir -p $@
  
@@ -49,7 +53,11 @@ index c1aee1c14..0f8a95418 100644
 +	$(MAKE) -C $(CURRENT_DIRECTORY)/fusee -f $(CURRENT_DIRECTORY)/fusee/fusee.mk clean ATMOSPHERE_CPU="$(strip $(ATMOSPHERE_BOOT_CPU))"
 +	$(MAKE) -C $(CURRENT_DIRECTORY)/stratosphere/ams_mitm clean
 +
-+.PHONY: dist-no-debug clean clean-8gb package3 emummc fusee stratosphere mesosphere exosphere
++# Partial clean for OC rebuild: only stratosphere/loader is modified by the OC patch.
++clean-oc:
++	$(MAKE) -C $(CURRENT_DIRECTORY)/stratosphere/loader clean
++
++.PHONY: dist-no-debug clean clean-8gb clean-oc package3 emummc fusee stratosphere mesosphere exosphere
 \ No newline at end of file
 -- 
 2.53.0.windows.1
