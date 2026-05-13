@@ -551,23 +551,29 @@ def translate_block_with_openai(ukr_block_text: str) -> str:
         "- Translate 'Оновлено' to 'Updated', 'Додано' to 'Added'.\n\n"
         f"Block:\n{ukr_block_text}"
     )
-    def try_request(url, model, timeout):
+    def try_request(url, model, timeout, use_auth=True):
         data = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.2
+            "temperature": 0.2,
+            "stream": False
         }
+        
+        req_headers = {"Content-Type": "application/json"}
+        if use_auth:
+            req_headers["Authorization"] = f"Bearer {api_key}"
+            
         req = urllib.request.Request(
             url,
             data=json.dumps(data, ensure_ascii=False).encode("utf-8"),
-            headers=headers,
+            headers=req_headers,
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             resp_body = json.loads(resp.read().decode("utf-8"))
             return resp_body["choices"][0]["message"]["content"].strip()
 
     try:
-        return try_request("http://localhost:20128/v1/chat/completions", "kr/claude-sonnet-4.5", 15)
+        return try_request("http://localhost:20128/v1/chat/completions", "kr/claude-sonnet-4.5", 15, use_auth=False)
     except Exception as e:
         print(f"[CHANGELOG] Local AI translation failed ({e}), falling back to OpenAI...", file=sys.stderr)
         try:
