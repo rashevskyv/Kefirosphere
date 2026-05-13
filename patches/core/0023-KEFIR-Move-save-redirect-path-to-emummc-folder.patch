@@ -1,0 +1,62 @@
+From 44d5aea0d432b58b738a7cbd72d9c6a2507bd444 Mon Sep 17 00:00:00 2001
+From: rashevskyv <rashevsky.v@gmail.com>
+Date: Wed, 13 May 2026 17:15:29 +0300
+Subject: [PATCH] KEFIR: Move save redirect path next to emuMMC Nintendo folder
+
+---
+ .../source/fs_mitm/fsmitm_save_utils.cpp      | 25 ++++++++++---------
+ 1 file changed, 13 insertions(+), 12 deletions(-)
+
+diff --git a/stratosphere/ams_mitm/source/fs_mitm/fsmitm_save_utils.cpp b/stratosphere/ams_mitm/source/fs_mitm/fsmitm_save_utils.cpp
+index cbc508ab9..c6ca64af4 100644
+--- a/stratosphere/ams_mitm/source/fs_mitm/fsmitm_save_utils.cpp
++++ b/stratosphere/ams_mitm/source/fs_mitm/fsmitm_save_utils.cpp
+@@ -90,22 +90,23 @@ namespace ams::mitm::fs {
+     }
+ 
+     Result SaveUtil::GetDirectorySaveDataPath(char *dst, size_t dst_size, ncm::ProgramId program_id, u8 space_id, const fs::SaveDataAttribute &attribute) {
+-        /* Saves should be separate for emunand vs sysnand. */
+-        const char *emummc_str = emummc::IsActive() ? "emummc" : "sysmmc";
+-        char m_emummc_name[0x7F + 1];
++        /* Saves are stored next to the Nintendo folder for the active emuMMC. */
++        char base_save_dir[0x100];
++        util::TSNPrintf(base_save_dir, sizeof(base_save_dir), "/atmosphere/saves");
+ 
+         if (emummc::IsActive()) {
+-            util::TSNPrintf(m_emummc_name, sizeof(m_emummc_name), "RAW%04x", emummc::GetActiveId());
+-            if (const char *emummc_file_name = emummc::GetFilePath(); emummc_file_name != nullptr) {
+-                for (int i = std::strlen(emummc_file_name) - 1; i >= 0; --i) {
+-                    if (emummc_file_name[i] == '/' || emummc_file_name[i] == '\\') {
+-                        util::TSNPrintf(m_emummc_name, sizeof(m_emummc_name), "%s", strdup(emummc_file_name + i + 1));
++            if (const char *nintendo_path = emummc::GetNintendoDirPath(); nintendo_path != nullptr) {
++                util::TSNPrintf(base_save_dir, sizeof(base_save_dir), "%s", nintendo_path);
++                /* Strip the last component (e.g., /Nintendo) */
++                for (int i = std::strlen(base_save_dir) - 1; i >= 0; --i) {
++                    if (base_save_dir[i] == '/' || base_save_dir[i] == '\\') {
++                        base_save_dir[i] = '\0';
+                         break;
+                     }
+                 }
++                /* Append /saves */
++                std::strncat(base_save_dir, "/saves", sizeof(base_save_dir) - std::strlen(base_save_dir) - 1);
+             }
+-        } else {
+-            util::TSNPrintf(m_emummc_name, sizeof(m_emummc_name), "SYS");
+         }
+ 
+         /* Get space_id, save_data_type strings. */
+@@ -117,9 +118,9 @@ namespace ams::mitm::fs {
+         const bool is_system = attribute.system_save_data_id != InvalidSystemSaveDataId && IsEmptyAccountId(attribute.user_id);
+         size_t out_path_len;
+         if (is_system) {
+-            out_path_len = static_cast<size_t>(util::SNPrintf(dst, dst_size, "/atmosphere/saves/%s/%s/%016lx/%s", emummc_str, m_emummc_name, attribute.system_save_data_id, save_type_str));
++            out_path_len = static_cast<size_t>(util::SNPrintf(dst, dst_size, "%s/%016lx/%s", base_save_dir, attribute.system_save_data_id, save_type_str));
+         } else {
+-            out_path_len = static_cast<size_t>(util::SNPrintf(dst, dst_size, "/atmosphere/saves/%s/%s/%016lx%016lx/%016lx/%s", emummc_str, m_emummc_name, attribute.user_id.data[1], attribute.user_id.data[0], static_cast<u64>(program_id), save_type_str));
++            out_path_len = static_cast<size_t>(util::SNPrintf(dst, dst_size, "%s/%016lx%016lx/%016lx/%s", base_save_dir, attribute.user_id.data[1], attribute.user_id.data[0], static_cast<u64>(program_id), save_type_str));
+         }
+ 
+         R_UNLESS(out_path_len < dst_size, fs::ResultTooLongPath());
+-- 
+2.53.0.windows.1
+
