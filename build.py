@@ -10,7 +10,7 @@ Kefirosphere Build Script
 Run via build.sh (which sources .env).
 """
 
-import os, sys, subprocess, logging, threading, re, time, shutil, argparse, zipfile
+import os, sys, subprocess, logging, threading, re, time, shutil, argparse, zipfile, json
 from datetime import datetime
 from pathlib import Path
 
@@ -22,7 +22,8 @@ SCRIPT_DIR    = Path(__file__).resolve().parent
 ATMOSPHERE_DIR = (SCRIPT_DIR / ".." / "Atmosphere").resolve()
 PATCHES_DIR   = SCRIPT_DIR / "patches"
 LOG_FILE      = SCRIPT_DIR / "build.log"
-STATE_FILE    = SCRIPT_DIR / "utilities" / "build_state.json"
+STATE_FILE      = SCRIPT_DIR / "utilities" / "build_state.json"
+BUILD_CFG_FILE  = SCRIPT_DIR / "utilities" / "build_config.json"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ANSI helpers
@@ -425,6 +426,37 @@ def load_env():
     }
 
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Build config (enable/disable branches)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def load_build_config() -> tuple[dict, dict]:
+    """Load build_config.json and return (branches, components) dicts.
+
+    branches: {"core": True, "8gb": True, "oc": False}
+    components: {"TegraExplorer": True, "fetch_tools": True}
+    Missing file or missing keys default to True (build everything).
+    """
+    br_defaults = {"core": True, "8gb": True, "oc": True}
+    comp_defaults = {"TegraExplorer": True}
+    if not BUILD_CFG_FILE.exists():
+        log.warning("build_config.json not found — building all branches")
+        return br_defaults, comp_defaults
+    try:
+        cfg = json.loads(BUILD_CFG_FILE.read_text(encoding="utf-8"))
+        branches = cfg.get("branches", {})
+        for key in br_defaults:
+            br_defaults[key] = branches.get(key, True)
+        components = cfg.get("components", {})
+        for key in comp_defaults:
+            comp_defaults[key] = components.get(key, True)
+        return br_defaults, comp_defaults
+    except Exception as e:
+        log.warning("Could not parse build_config.json: %s — building all branches", e)
+        return br_defaults, comp_defaults
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Version management
 # ─────────────────────────────────────────────────────────────────────────────
@@ -742,7 +774,9 @@ except AttributeError:
     NPROCS = os.cpu_count() or 4
 
 
-def build(env, patches_to_apply, adv_flag):
+def build(env, patches_to_apply, adv_flag, components=None):
+    if components is None:
+        components = {"TegraExplorer": True, "fetch_tools": True}
     # Use hardcoded estimation instead of slow source file counting
     total_files = _ESTIMATED_FILES
 
@@ -822,15 +856,17 @@ def build(env, patches_to_apply, adv_flag):
         # Step 3 — compilation
         prog.set(phase="Step 3/3 — Compiling targets", branch="master", module="—")
         try:
-            tegra_dir = (SCRIPT_DIR / ".." / "TegraExplorer").resolve()
-            if tegra_dir.exists():
-                prog.set(phase="Step 3.1 — Compiling TegraExplorer", module="TegraExplorer")
-                run_make(["make", "clean"], cwd=tegra_dir, progress=prog)
-                run_make(["make", f"-j{NPROCS}"] + make_vars, cwd=tegra_dir, progress=prog)
-                prog.set(phase="Step 3.2 — Compiling targets", branch="master", module="—")
+            if components.get("TegraExplorer", True):
+                tegra_dir = (SCRIPT_DIR / ".." / "TegraExplorer").resolve()
+                if tegra_dir.exists():
+                    prog.set(phase="Step 3.1 — Compiling TegraExplorer", module="TegraExplorer")
+                    run_make(["make", "clean"], cwd=tegra_dir, progress=prog)
+                    run_make(["make", f"-j{NPROCS}"] + make_vars, cwd=tegra_dir, progress=prog)
+                    prog.set(phase="Step 3.2 — Compiling targets", branch="master", module="—")
+            else:
+                log.info("TegraExplorer build skipped (disabled in build_config.json)")
                 
             if "core" in patches_to_apply:
-                run(["python3", str(SCRIPT_DIR / "utilities" / "fetch_tools.py")], check=True)
                 run_make(["make", "clean", f"-j{NPROCS}"] + make_vars, progress=prog)
                 run_make(["make", "nx_release", f"-j{NPROCS}"] + make_vars, progress=prog)
 
@@ -882,8 +918,9 @@ def build(env, patches_to_apply, adv_flag):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Kefirosphere Build Script")
-    parser.add_argument("--patches", nargs="*", default=["core", "8gb", "oc"],
-                        help="Which patches to apply and build. E.g. --patches core 8gb. Pass empty (e.g. without arguments if using a wrapper) for clean Atmosphere.")
+    parser.add_argument("--patches", nargs="*", default=None,
+                        help="Which patches to apply and build. E.g. --patches core 8gb. "
+                             "Defaults to branches enabled in build_config.json.")
     parser.add_argument("--adv", action="store_true", help="Advanced options. Interactive TUI patch selection.")
     return parser.parse_args()
 
@@ -891,11 +928,25 @@ def parse_args():
 def main():
     args = parse_args()
 
+    # Resolve which branches to build: CLI override > build_config.json
+    build_cfg, components = load_build_config()
+    if args.patches is not None:
+        patches = args.patches
+    else:
+        patches = [b for b, enabled in build_cfg.items() if enabled]
+
+    disabled_branches = [b for b, enabled in build_cfg.items() if not enabled]
+    disabled_components = [c for c, enabled in components.items() if not enabled]
+
     log.info("=" * 60)
     log.info("Kefirosphere Build — %s", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     log.info("  Atmosphere : %s", ATMOSPHERE_DIR)
     log.info("  Patches    : %s", PATCHES_DIR)
-    log.info("  Variants   : %s", args.patches if args.patches else "None (Clean)")
+    log.info("  Variants   : %s", patches if patches else "None (Clean)")
+    if disabled_branches:
+        log.info("  Disabled branches    : %s", disabled_branches)
+    if disabled_components:
+        log.info("  Disabled components  : %s", disabled_components)
     log.info("  CPU cores  : %d (parallel jobs)", NPROCS)
     log.info("=" * 60)
 
@@ -904,7 +955,7 @@ def main():
         sys.exit(1)
 
     env = load_env()
-    ok  = build(env, args.patches, args.adv)
+    ok  = build(env, patches, args.adv, components)
     log.info("Log: %s", LOG_FILE)
     sys.exit(0 if ok else 1)
 

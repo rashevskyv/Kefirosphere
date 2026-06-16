@@ -1,0 +1,179 @@
+From ff82e4c7912415d4629fcb9b08e5af7960aadf75 Mon Sep 17 00:00:00 2001
+From: rashevskyv <rashevsky.v@gmail.com>
+Date: Tue, 16 Jun 2026 18:33:42 +0300
+Subject: [PATCH] KEFIR: Daybreak modifications (exFAT support, disable factory
+ reset, current firmware version display, and firmware folder auto-deletion)
+
+---
+ troposphere/daybreak/source/main.cpp |  5 ++
+ troposphere/daybreak/source/ui.cpp   | 70 +++++++++++++++++++++-------
+ 2 files changed, 59 insertions(+), 16 deletions(-)
+
+diff --git a/troposphere/daybreak/source/main.cpp b/troposphere/daybreak/source/main.cpp
+index 5bbeac4a5..b1744d5ca 100644
+--- a/troposphere/daybreak/source/main.cpp
++++ b/troposphere/daybreak/source/main.cpp
+@@ -50,6 +50,10 @@ extern "C" {
+             fatalThrow(rc);
+         }
+ 
++        // Initialize setsys service to get firmware version
++        if (R_FAILED(rc = setsysInitialize())) {
++            fatalThrow(rc);
++        }
+     }
+ 
+     void userAppExit(void) {
+@@ -59,6 +63,7 @@ extern "C" {
+         plExit();
+         spsmExit();
+         romfsExit();
++        setsysExit();
+         amssuExit();
+     }
+ 
+diff --git a/troposphere/daybreak/source/ui.cpp b/troposphere/daybreak/source/ui.cpp
+index 1e63f8811..6c60228d7 100644
+--- a/troposphere/daybreak/source/ui.cpp
++++ b/troposphere/daybreak/source/ui.cpp
+@@ -22,6 +22,7 @@
+ #include "ui.hpp"
+ #include "ui_util.hpp"
+ #include "assert.hpp"
++#include <switch/services/set.h>
+ 
+ namespace dbk {
+ 
+@@ -66,8 +67,8 @@ namespace dbk {
+         /* Update install state. */
+         char g_update_path[FS_MAX_PATH];
+         bool g_reset_to_factory = false;
+-        bool g_exfat_supported = false;
+-        bool g_use_exfat = false;
++        bool g_exfat_supported = true;
++        bool g_use_exfat = true;
+ 
+         constexpr u32 MaxTapMovement = 20;
+ 
+@@ -413,7 +414,7 @@ namespace dbk {
+         const float button_y = y + TitleGap + SubTextHeight + VerticalGap * 2.0f + (R_FAILED(m_rc) ? SubTextHeight : 0.0f);
+         const float button_width = (WindowWidth - HorizontalInset * 2.0f) / 2.0f - ButtonHorizontalGap;
+         this->AddButton(BackButtonId, "Back", x + HorizontalInset, button_y, button_width, ButtonHeight);
+-        this->AddButton(ContinueButtonId, "Continue", x + HorizontalInset + button_width + ButtonHorizontalGap, button_y, button_width, ButtonHeight);
++        this->AddButton(ContinueButtonId, "Install", x + HorizontalInset + button_width + ButtonHorizontalGap, button_y, button_width, ButtonHeight);
+         this->SetButtonSelected(ContinueButtonId, true);
+     }
+ 
+@@ -766,7 +767,7 @@ namespace dbk {
+ 
+         /* Add buttons. */
+         this->AddButton(BackButtonId, "Back", x + HorizontalInset, y + WindowHeight - BottomInset - ButtonHeight, button_width, ButtonHeight);
+-        this->AddButton(ContinueButtonId, "Continue", x + HorizontalInset + button_width + ButtonHorizontalGap, y + WindowHeight - BottomInset - ButtonHeight, button_width, ButtonHeight);
++        this->AddButton(ContinueButtonId, "Install", x + HorizontalInset + button_width + ButtonHorizontalGap, y + WindowHeight - BottomInset - ButtonHeight, button_width, ButtonHeight);
+         this->SetButtonEnabled(BackButtonId, false);
+         this->SetButtonEnabled(ContinueButtonId, false);
+ 
+@@ -795,12 +796,26 @@ namespace dbk {
+         }
+ 
+         /* Print update information. */
+-        this->LogText("- Version: %d.%d.%d\n", (m_update_info.version >> 26) & 0x1f, (m_update_info.version >> 20) & 0x1f, (m_update_info.version >> 16) & 0xf);
++        this->LogText("- Target Version: %u.%u.%u\n", (m_update_info.version >> 26) & 0x1f, (m_update_info.version >> 20) & 0x1f, (m_update_info.version >> 16) & 0xf);
+         if (m_update_info.exfat_supported) {
+-            this->LogText("- exFAT: Supported\n");
++            this->LogText("- Target exFAT: Supported\n");
+         } else {
+-            this->LogText("- exFAT: Unsupported\n");
++            this->LogText("- Target exFAT: Unsupported\n");
++        }
++
++        // Отримати та вивести поточну версію системної прошивки
++        SetSysFirmwareVersion current_fw_version; // Оголошення змінної
++        // memset(&current_fw_version, 0, sizeof(current_fw_version));
++        Result rc_fw = setsysGetFirmwareVersion(&current_fw_version); // Передача адреси оголошеної змінної
++        if (R_SUCCEEDED(rc_fw)) {
++            this->LogText("- Current System Version: %u.%u.%u\n",
++                          current_fw_version.major,
++                          current_fw_version.minor,
++                          current_fw_version.micro);
++        } else {
++            this->LogText("- Current System Version: (Failed to get: 0x%08x)\n", rc_fw);
+         }
++
+         this->LogText("- Firmware variations: %d\n", m_update_info.num_firmware_variations);
+ 
+         /* Mark as having obtained update info. */
+@@ -889,11 +904,14 @@ namespace dbk {
+                     /* Check if exfat is supported. */
+                     g_exfat_supported = m_update_info.exfat_supported && R_SUCCEEDED(m_validation_info.exfat_result);
+                     if (!g_exfat_supported) {
+-                        g_use_exfat = false;
++                        g_use_exfat = true;
+                     }
+ 
+-                    /* Create the next menu. */
+-                    std::shared_ptr<Menu> next_menu = std::make_shared<ChooseResetMenu>(g_current_menu);
++                    /* Set the reset to factory settings flag to false by default. */
++                    g_reset_to_factory = false;
++
++                    /* Create the install update menu. */
++                    std::shared_ptr<Menu> next_menu = std::make_shared<InstallUpdateMenu>(g_current_menu);
+ 
+                     /* Warn the user if they're updating with exFAT supposed to be supported but not present/corrupted. */
+                     if (m_update_info.exfat_supported && R_FAILED(m_validation_info.exfat_result)) {
+@@ -960,11 +978,7 @@ namespace dbk {
+ 
+             std::shared_ptr<Menu> next_menu;
+ 
+-            if (g_exfat_supported) {
+-                next_menu = std::make_shared<ChooseExfatMenu>(g_current_menu);
+-            } else {
+-                next_menu = std::make_shared<WarningMenu>(g_current_menu, std::make_shared<InstallUpdateMenu>(g_current_menu), "Ready to begin update installation", "Are you sure you want to proceed?");
+-            }
++            next_menu = std::make_shared<WarningMenu>(g_current_menu, std::make_shared<InstallUpdateMenu>(g_current_menu), "Ready to begin update installation", "Are you sure you want to proceed?");
+ 
+             if (g_reset_to_factory) {
+                 ChangeMenu(std::make_shared<WarningMenu>(g_current_menu, next_menu, "Warning: Factory reset selected", "Saves and installed games will be permanently deleted."));
+@@ -1022,7 +1036,7 @@ namespace dbk {
+         if (const Button *activated_button = this->GetActivatedButton(); activated_button != nullptr) {
+             switch (activated_button->id) {
+                 case Fat32ButtonId:
+-                    g_use_exfat = false;
++                    g_use_exfat = true;
+                     break;
+                 case ExFatButtonId:
+                     g_use_exfat = true;
+@@ -1145,6 +1159,30 @@ namespace dbk {
+                 /* Log success. */
+                 this->LogText("Update applied successfully.\n");
+ 
++                /* Delete the update directory. */
++                if (std::strlen(g_update_path) > 0) {
++                    this->LogText("Deleting update directory...\n");
++
++                    /* Remove trailing slash if present. */
++                    char path_to_delete[FS_MAX_PATH];
++                    strncpy(path_to_delete, g_update_path, sizeof(path_to_delete)-1);
++                    size_t len = std::strlen(path_to_delete);
++                    if (len > 0 && path_to_delete[len-1] == '/') {
++                        path_to_delete[len-1] = '\0';
++                    }
++
++                    /* Delete the directory recursively. */
++                    FsFileSystem *fs;
++                    char translated_path[FS_MAX_PATH] = {};
++                    if (fsdevTranslatePath(path_to_delete, &fs, translated_path) != -1) {
++                        if (R_SUCCEEDED(fsFsDeleteDirectoryRecursively(fs, translated_path))) {
++                            this->LogText("Update directory deleted.\n");
++                        } else {
++                            this->LogText("Failed to delete update directory.\n");
++                        }
++                    }
++                }
++
+                 if (g_reset_to_factory) {
+                     if (R_FAILED(rc = nsResetToFactorySettingsForRefurbishment())) {
+                         /* Fallback on ResetToFactorySettings. */
+-- 
+2.53.0.windows.1
+
