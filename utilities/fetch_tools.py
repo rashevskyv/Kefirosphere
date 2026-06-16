@@ -547,6 +547,8 @@ def build_mission_control_custom(tool_id, tag, env_vars):
         # 4. Build
         # 5. Distribute
         bash_cmds = [
+            "export DEVKITPRO=/opt/devkitpro",
+            "export PATH=\"$DEVKITPRO/devkitA64/bin:$DEVKITPRO/tools/bin:$PATH\"",
             f"rm -rf \"{wsl_build_dir}\"",
             f"echo \"[{tool_id}] Cloning repository...\"",
             f"git clone --depth 1 --recurse-submodules --shallow-submodules -b \"{tag}\" \"{repo_url}\" \"{wsl_build_dir}\" > /dev/null 2>&1",
@@ -558,8 +560,8 @@ def build_mission_control_custom(tool_id, tag, env_vars):
             f"echo \"[{tool_id}] Starting build (using all cores)...\"",
             f"make dist -j$(nproc)",
             f"echo \"[{tool_id}] Distributing files...\"",
-            f"rsync -av \"dist/atmosphere/\" \"{wsl_kefir_root}/atmosphere/\" > /dev/null",
-            f"rsync -av \"dist/config/\" \"{wsl_kefir_root}/config/\" > /dev/null"
+            f"rsync -av \"dist/atmosphere/\" \"{wsl_kefir_root}/kefir/atmosphere/\" > /dev/null",
+            f"rsync -av \"dist/config/\" \"{wsl_kefir_root}/kefir/config/\" > /dev/null"
         ]
         
         full_bash = " && ".join(bash_cmds)
@@ -696,6 +698,16 @@ def process_tool(tool_config, env_vars, hos_version=None):
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Fetch and build Kefirosphere tools")
+    parser.add_argument("--only", type=str, default=None,
+                        help="Process only a specific tool by ID (e.g. MISSIONCONTROL)")
+    parser.add_argument("--exclude", type=str, nargs="*", default=[],
+                        help="Exclude specific tools by ID (e.g. --exclude MISSIONCONTROL)")
+    parser.add_argument("--force", action="store_true",
+                        help="Force re-download/rebuild even if version matches cache")
+    args = parser.parse_args()
+
     kefir_root_dir = get_env_var("KEFIR_ROOT_DIR")
     if not kefir_root_dir:
         print("[ERROR] KEFIR_ROOT_DIR is not set in .env", file=sys.stderr)
@@ -732,18 +744,41 @@ def main():
     sync_hos_in_changelog(changelog_path, hos_version)
 
     tools_config = load_tools_config()
+
+    # Filter to a single tool if --only is specified
+    if args.only:
+        tools_config = [t for t in tools_config if t["id"] == args.only.upper()]
+        if not tools_config:
+            print(f"[ERROR] Tool '{args.only}' not found in tools_config.json", file=sys.stderr)
+            sys.exit(1)
+        print(f"[INFO] Running only: {args.only.upper()}")
+
+    # Exclude specific tools if --exclude is specified
+    if args.exclude:
+        exclude_ids = {e.upper() for e in args.exclude}
+        tools_config = [t for t in tools_config if t["id"] not in exclude_ids]
+        print(f"[INFO] Excluded tools: {', '.join(exclude_ids)}")
+
+    # If --force, temporarily clear cached versions so tools are re-processed
+    if args.force:
+        print("[INFO] Force mode: ignoring cached versions")
+        for tool in tools_config:
+            ver_key = f"{tool['id']}_LATEST_VERSION"
+            state.set(ver_key, None)
+
     for tool in tools_config:
         ok, downloaded = process_tool(tool, env_vars, hos_version)
         if tool["id"] == "MISSIONCONTROL" and downloaded:
             mc_updated = True
 
     # -- MissionControl Toggling --
-    if hos_bumped and not mc_updated:
-        print(f"[HOS] HOS bumped ({cached_hos} -> {current_hos}) without a MissionControl update. Disabling MissionControl.")
-        toggle_missioncontrol(False, kefir_root_dir)
-    elif mc_updated:
-        print(f"[HOS] MissionControl updated. Enabling MissionControl.")
-        toggle_missioncontrol(True, kefir_root_dir)
+    if not args.only:  # Only toggle when running full pipeline
+        if hos_bumped and not mc_updated:
+            print(f"[HOS] HOS bumped ({cached_hos} -> {current_hos}) without a MissionControl update. Disabling MissionControl.")
+            toggle_missioncontrol(False, kefir_root_dir)
+        elif mc_updated:
+            print(f"[HOS] MissionControl updated. Enabling MissionControl.")
+            toggle_missioncontrol(True, kefir_root_dir)
 
     if current_hos and hos_bumped:
         state.set("HOS_VERSION", current_hos)
@@ -761,3 +796,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

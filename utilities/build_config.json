@@ -1,0 +1,10 @@
+{
+    "branches": {
+        "core": true,
+        "8gb": true,
+        "oc": true
+    },
+    "components": {
+        "TegraExplorer": true
+    }
+}
